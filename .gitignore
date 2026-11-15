@@ -10,3 +10,7 @@ data/
 termharvest.db
 *.sqlite
 .benchmarks/
+node_modules/
+*.pyc
+.coverage
+.env
