@@ -1,0 +1,10 @@
+version: 1
+session_id: demo_session
+target: {host: 127.0.0.1, port: 19771}
+start: {screen_id: main_menu, contains: [SYNTHETIC OPERATIONS CONSOLE, MAIN MENU]}
+retry: {attempts: 2, timeout_seconds: 2.0, backoff_ms: 100}
+paging: {screen_id: demo_bill_list, page_key: PF7, max_pages: 3, stop_marker: END OF LIST, stop_on_repeated_page: true}
+steps:
+  - {id: open_customer, key: C, expect: {screen_id: demo_customer, contains: [CUSTOMER PROFILE, C00042]}}
+  - {id: open_bills, key: ENTER, expect: {screen_id: demo_bill_list, contains: [BILL LIST, PAGE 1 OF 2]}}
+  - {id: next_page, key: PF7, expect: {screen_id: demo_bill_list, contains: [BILL LIST, PAGE 2 OF 2]}}

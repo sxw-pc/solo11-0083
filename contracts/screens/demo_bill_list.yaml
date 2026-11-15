@@ -1,0 +1,18 @@
+version: 1
+screen_id: demo_bill_list
+description: Synthetic paged bill list (fixture only).
+match: [BILL LIST, BILL ID]
+primary_key: [bill_id]
+list_region:
+  start_row: 5
+  end_row: 19
+  step: 1
+  skip_blank: true
+  columns:
+    bill_id: {start: 1, end: 11}
+    bill_date: {start: 12, end: 23}
+    amount: {start: 25, end: 36}
+    status: {start: 38, end: 48}
+summary_fields:
+  - {name: batch_count, locator: {kind: label, label: BATCH COUNT, search_rows: [20, 20], direction: right, length: 8}}
+  - {name: batch_total, locator: {kind: label, label: BATCH TOTAL, search_rows: [21, 21], direction: right, length: 16}}

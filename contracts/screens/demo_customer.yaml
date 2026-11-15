@@ -1,0 +1,18 @@
+version: 1
+screen_id: demo_customer
+description: Synthetic customer profile screen (fixture only).
+match: [CUSTOMER PROFILE, CUSTOMER ID]
+primary_key: [customer_id]
+fields:
+  - {name: customer_id, locator: {kind: label, label: CUSTOMER ID, search_rows: [3, 3], direction: right, length: 16}}
+  - {name: customer_name, locator: {kind: label, label: CUSTOMER NAME, search_rows: [4, 4], direction: right, length: 40}}
+  - {name: city, locator: {kind: label, label: CITY, search_rows: [5, 5], direction: right, length: 30}}
+  - {name: status, locator: {kind: label, label: STATUS, search_rows: [6, 6], direction: right, length: 16}}
+  - {name: balance, locator: {kind: label, label: BALANCE, search_rows: [7, 7], direction: right, length: 16}}
+  - {name: credit_limit, locator: {kind: label, label: CREDIT LIMIT, search_rows: [8, 8], direction: right, length: 16}}
+  - {name: period_start, locator: {kind: label, label: PERIOD START, search_rows: [9, 9], direction: right, length: 16}}
+  - {name: period_end, locator: {kind: label, label: PERIOD END, search_rows: [10, 10], direction: right, length: 16}}
+  - {name: mailing_address, locator: {kind: multiline, rows: [11, 12], col: 23, length: 40, join: " / "}}
+  - {name: notes, locator: {kind: label, label: NOTES, search_rows: [13, 13], direction: next_line, row_offset: 1, col: 2, length: 70}}
+  - {name: region_code, locator: {kind: label, label: REGION CODE, search_rows: [15, 15], direction: right, length: 8}}
+  - {name: operator_token, sensitive: true, locator: {kind: label, label: OPERATOR TOKEN, search_rows: [22, 22], direction: right, length: 40}}
