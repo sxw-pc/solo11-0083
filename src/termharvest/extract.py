@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config_types import Locator, ScreenContract, ScreenField
+from .config_types import ListRegion, Locator, ScreenContract, ScreenField
 from .errors import E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, HarvestError
 from .screen import ScreenFrame, ensure_contract_match, ensure_fingerprint, find_label_row, normalize_value
 
@@ -24,13 +24,30 @@ class Extraction:
     def to_dict(self) -> dict[str, Any]:
         return {"screen_id": self.screen_id, "frame_seq": self.frame_seq, "frame_sha256": self.frame_sha256, "records": self.records, "facts": self.facts, "sensitive_skipped": self.sensitive_skipped}
 
-def _locate(frame: ScreenFrame, locator: Locator, field_name: str) -> str:
+@dataclass(frozen=True)
+class ValueRegion:
+    """Character cells a locator reads on one frame: row, [col_start, col_end)."""
+
+    row: int
+    col_start: int
+    col_end: int
+
+    @property
+    def cells(self) -> int:
+        return self.col_end - self.col_start
+
+def locate_value_regions(frame: ScreenFrame, locator: Locator, field_name: str) -> list[ValueRegion]:
+    """Resolve a locator to the exact frame cells it reads.
+
+    This is the single source of truth for where a field value lives on the
+    24x80 screen; extraction and counterexample editing both go through it.
+    """
     data = locator.data
     if locator.kind == "absolute":
         row, col, length = data["row"], data["col"], data["length"]
         if row >= len(frame.rows):
             raise HarvestError(E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, "absolute row is outside the frame", context={"field": field_name, "row": row})
-        return frame.rows[row][col : col + length].strip()
+        return [ValueRegion(row, col, col + length)]
 
     if locator.kind == "label":
         first, last = data["search_rows"]
@@ -43,26 +60,36 @@ def _locate(frame: ScreenFrame, locator: Locator, field_name: str) -> str:
                 start += 1
             length = data["length"]
             end = 80 if length is None else min(80, start + length)
-            return frame.rows[row_index][start:end].strip()
+            return [ValueRegion(row_index, start, end)]
         target_row = row_index + data["row_offset"]
         if target_row >= len(frame.rows):
             raise HarvestError(E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, "next_line value row is outside the frame", context={"field": field_name, "row": target_row})
         start = data["col"] or 0
         length = data["length"]
         end = 80 if length is None else min(80, start + length)
-        return frame.rows[target_row][start:end].strip()
+        return [ValueRegion(target_row, start, end)]
 
     if locator.kind == "multiline":
-        pieces: list[str] = []
+        regions: list[ValueRegion] = []
         for row_index in data["rows"]:
             if row_index >= len(frame.rows):
                 raise HarvestError(E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, "multiline row is outside the frame", context={"field": field_name, "row": row_index})
-            piece = frame.rows[row_index][data["col"] : data["col"] + data["length"]].strip()
-            if piece:
-                pieces.append(piece)
-        return data["join"].join(pieces)
+            regions.append(ValueRegion(row_index, data["col"], data["col"] + data["length"]))
+        return regions
 
     raise HarvestError(E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, f"unsupported locator kind {locator.kind!r}", context={"field": field_name})
+
+def _locate(frame: ScreenFrame, locator: Locator, field_name: str) -> str:
+    regions = locate_value_regions(frame, locator, field_name)
+    if locator.kind == "multiline":
+        pieces: list[str] = []
+        for region in regions:
+            piece = frame.rows[region.row][region.col_start : region.col_end].strip()
+            if piece:
+                pieces.append(piece)
+        return locator.data["join"].join(pieces)
+    region = regions[0]
+    return frame.rows[region.row][region.col_start : region.col_end].strip()
 
 def _extract_fields(frame: ScreenFrame, fields: tuple[ScreenField, ...], *, skipped: list[str]) -> tuple[dict[str, str], dict[str, str | None]]:
     raw_values: dict[str, str] = {}
@@ -97,11 +124,9 @@ def _record(contract: ScreenContract, frame: ScreenFrame, frame_seq: int, raw_va
         "record_key": make_record_key(contract.screen_id, contract.primary_key, normalized, raw_values),
     }
 
-def _list_page_records(frame: ScreenFrame, contract: ScreenContract, frame_seq: int, skipped: list[str], stop_marker: str | None) -> list[dict[str, Any]]:
-    region = contract.list_region
-    if region is None:
-        return []
-    records: list[dict[str, Any]] = []
+def list_record_rows(frame: ScreenFrame, region: ListRegion, stop_marker: str | None) -> list[int]:
+    """Row indexes inside a list region that produce records on this frame."""
+    rows: list[int] = []
     for row_index in range(region.start_row, region.end_row, region.step):
         line = frame.rows[row_index]
         if stop_marker and stop_marker in line:
@@ -111,6 +136,17 @@ def _list_page_records(frame: ScreenFrame, contract: ScreenContract, frame_seq: 
         raw = {column.name: line[column.start : column.end].strip() for column in region.columns}
         if not any(value for value in raw.values()):
             continue
+        rows.append(row_index)
+    return rows
+
+def _list_page_records(frame: ScreenFrame, contract: ScreenContract, frame_seq: int, skipped: list[str], stop_marker: str | None) -> list[dict[str, Any]]:
+    region = contract.list_region
+    if region is None:
+        return []
+    records: list[dict[str, Any]] = []
+    for row_index in list_record_rows(frame, region, stop_marker):
+        line = frame.rows[row_index]
+        raw = {column.name: line[column.start : column.end].strip() for column in region.columns}
         normalized = {column.name: normalize_value(raw[column.name], ("trim", "collapse_space", "fullwidth_digits")) for column in region.columns}
         records.append(_record(contract, frame, frame_seq, raw, normalized))
     return records

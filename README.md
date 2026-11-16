@@ -88,7 +88,7 @@ scripts/
   run_demo.sh   一键演示
   make_fixtures.py  重新生成 24×80 场景与 cassette
 src/termharvest/  实现与 CLI
-tests/            65 个离线测试
+tests/            89 个离线测试
 data/             运行期产物（已 gitignore）
 ```
 
@@ -189,6 +189,40 @@ list_region:
 - 两种模式使用同一套抽取、校验、入库和报告代码。示例 fixture 的 live/replay
   记录完全一致，`scripts/run_demo.sh` 会自动交叉核验。
 
+## 反例回放生成器
+
+`counterexample` 子命令从一份**验证通过**的 cassette 出发，按屏幕/会话契约与
+目标 `check_id` 反向定位可编辑的 24×80 单元格，枚举有界候选并逐一重放验证，
+输出一份**只触发该规则**的最小反例 cassette 与可复核的变更证明，全程离线：
+
+```bash
+python -m termharvest.cli counterexample \
+  --session contracts/sessions/demo_session.yaml \
+  --screens contracts/screens \
+  --validators contracts/validators/demo_rules.yaml \
+  --cassette fixtures/cassettes/demo_replay.jsonl \
+  --check-id bill_total_matches_detail \
+  --strategy fact \
+  --out data/counterexample
+```
+
+- 第一阶段支持：字段 required/type/range（规则 id 为 `field:<screen>.<field>`）、
+  record_check、批次 `sum_equals`/`count_equals`；其他规则明确拒绝
+  （`E_COUNTEREXAMPLE_UNSUPPORTED`）。
+- 基线回放或校验未通过、目标规则本已失败时拒绝生成（`E_COUNTEREXAMPLE_BASELINE`）。
+- 只允许改非敏感值/页脚：屏幕匹配片段、会话期望、导航帧、主键、敏感字段与
+  帧尺寸都不可触碰；重叠 locator 的候选直接跳过。
+- 每个候选都重做完整 cassette 帧 hash/序号/尾记录校验、抽取与全部校验；只有
+  目标 check_id 由通过转为失败、其余规则结果与基线一致、非目标记录规范化值
+  不变，才算有效反例（多规则失败不会被伪装成单规则反例）。
+- `sum_equals` 有两条授权路线：`--strategy fact`（改页脚合计，明细不变）与
+  `--strategy amount`（改一笔明细金额，页脚不变）；默认 `auto` 依次尝试。
+- 按改变单元格数、受影响帧数、帧序号选最小候选；搜索预算用
+  `--max-candidates` 控制，无解（`E_COUNTEREXAMPLE_NO_SOLUTION`）与超限
+  （`E_COUNTEREXAMPLE_LIMIT`）明确区分，失败时不输出任何文件。
+- 输出 `counterexample.jsonl` 与 `proof.json`（补丁清单含屏幕/行列/旧新摘要，
+  不含敏感内容；附基线与反例规则结果）；同一输入重复生成字节稳定。
+
 ## 主要错误码
 
 | 错误码 | 含义 |
@@ -206,6 +240,7 @@ list_region:
 | `E_SCREEN_FINGERPRINT_MISMATCH` | 指纹不一致 |
 | `E_FIELD_*` / `E_RECORD_CONSISTENCY` / `E_BATCH_*` | 字段/记录/批次校验失败 |
 | `E_CASSETTE_*` | cassette 解析、顺序或完整性失败 |
+| `E_COUNTEREXAMPLE_*` | 反例生成：基线未过、规则不支持、无解或超限 |
 
 配置错误优先于网络行为；只有 loopback 目标才可能进入连接阶段。
 

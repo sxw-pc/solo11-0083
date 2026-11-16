@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .capture import CapturedFrame
-from .cassette import load_cassette
+from .cassette import Cassette, load_cassette
 from .clock import Clock, SystemClock
 from .config_types import SessionContract
 from .errors import E_CASSETTE_INCOMPLETE, E_CASSETTE_MISMATCH, E_SCREEN_UNEXPECTED, HarvestError
@@ -16,6 +16,12 @@ from .session import EventSink, _write_evidence
 def collect_replay(
     cassette_path: str | Path, session: SessionContract, *, event_sink: EventSink | None = None, clock: Clock | None = None, evidence_dir: str | Path | None = None, logger: Any = None
 ) -> list[CapturedFrame]:
+    return verify_replay(load_cassette(cassette_path), session, event_sink=event_sink, clock=clock, evidence_dir=evidence_dir, logger=logger)
+
+def verify_replay(
+    cassette: Cassette, session: SessionContract, *, event_sink: EventSink | None = None, clock: Clock | None = None, evidence_dir: str | Path | None = None, logger: Any = None
+) -> list[CapturedFrame]:
+    """Verify a parsed cassette against the session contract and return frames."""
     clock = clock or SystemClock()
     evidence = Path(evidence_dir) if evidence_dir else None
 
@@ -26,7 +32,6 @@ def collect_replay(
             log = logger.info if level == "info" else logger.error
             log("event=%s code=%s %s", event_type, code or "-", message)
 
-    cassette = load_cassette(cassette_path)
     if cassette.session_id != session.session_id:
         raise HarvestError(E_CASSETTE_MISMATCH, "cassette session_id does not match session contract", context={"cassette_session_id": cassette.session_id, "session_id": session.session_id})
     expected = [("start", session.start.screen_id, session.start.contains)]

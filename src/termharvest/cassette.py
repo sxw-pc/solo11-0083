@@ -27,15 +27,19 @@ class Cassette:
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
-def write_cassette(path: str | Path, *, session_id: str, frames: list[tuple[int, str, str, ScreenFrame]], captured_by: str = "mock") -> None:
-    """Write a stable JSONL cassette from (seq, step, screen, frame) rows."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+def dumps_cassette(*, session_id: str, frames: list[tuple[int, str, str, ScreenFrame]], captured_by: str = "mock") -> str:
+    """Serialize (seq, step, screen, frame) rows to canonical JSONL text."""
     lines: list[str] = [_canonical({"record_type": "header", "version": 1, "session_id": session_id, "captured_by": captured_by})]
     for seq, step_id, expected_screen, frame in frames:
         lines.append(_canonical({"record_type": "frame", "frame_seq": seq, "step_id": step_id, "expected_screen": expected_screen, "frame_sha256": frame.sha256, "text": frame.text}))
     lines.append(_canonical({"record_type": "trailer", "frame_count": len(frames)}))
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
+
+def write_cassette(path: str | Path, *, session_id: str, frames: list[tuple[int, str, str, ScreenFrame]], captured_by: str = "mock") -> None:
+    """Write a stable JSONL cassette from (seq, step, screen, frame) rows."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(dumps_cassette(session_id=session_id, frames=frames, captured_by=captured_by), encoding="utf-8")
 
 def load_cassette(path: str | Path) -> Cassette:
     source = Path(path)
@@ -43,6 +47,10 @@ def load_cassette(path: str | Path) -> Cassette:
         text = source.read_text(encoding="utf-8")
     except OSError as exc:
         raise HarvestError(E_CASSETTE_PARSE, f"cannot read cassette: {exc}", context={"file": str(source)}) from exc
+    return loads_cassette(text, source=str(source))
+
+def loads_cassette(text: str, *, source: str = "<memory>") -> Cassette:
+    """Parse and fully verify cassette JSONL text (hashes, sequence, trailer)."""
 
     header: dict[str, Any] | None = None
     frames: list[CassetteFrame] = []

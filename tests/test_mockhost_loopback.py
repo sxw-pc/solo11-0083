@@ -54,7 +54,10 @@ def test_once_mode_stops_after_one_connection(demo_paths):
         server.stop()
 
 def test_timeout_behavior_drops_frames(demo_paths):
-    server = MockTerminalServer(demo_paths["error"], port=0, frame_timeout=0.15)
+    # The server must outwait the client: with equal timeouts the server's
+    # connection close can win the race and surface E_CONNECTION_CLOSED
+    # instead of the client-side frame timeout under test.
+    server = MockTerminalServer(demo_paths["error"], port=0, frame_timeout=2.0)
     server.start()
     connection = socket.create_connection(server.address, timeout=2.0)
     connection.settimeout(0.15)

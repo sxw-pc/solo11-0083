@@ -52,6 +52,37 @@ class ValidationConfig:
     record_checks: tuple[RecordCheck, ...] = ()
     batch_checks: tuple[BatchCheck, ...] = ()
 
+@dataclass(frozen=True)
+class CheckTarget:
+    """A single check addressable by its rule id (as reported in errors)."""
+
+    kind: str  # "field" | "record_check" | "batch_check"
+    check_id: str
+    screen_id: str
+    field_name: str | None = None
+    field_rule: FieldRule | None = None
+    record_check: RecordCheck | None = None
+    batch_check: BatchCheck | None = None
+
+def find_check(config: ValidationConfig, check_id: str) -> CheckTarget | None:
+    """Resolve a rule id (``field:<screen>.<field>`` or a check id) to its rule."""
+    if check_id.startswith("field:"):
+        rest = check_id[len("field:") :]
+        if "." not in rest:
+            return None
+        screen_id, field_name = rest.rsplit(".", 1)
+        rule = config.fields.get(screen_id, {}).get(field_name)
+        if rule is None:
+            return None
+        return CheckTarget(kind="field", check_id=check_id, screen_id=screen_id, field_name=field_name, field_rule=rule)
+    for check in config.record_checks:
+        if check.check_id == check_id:
+            return CheckTarget(kind="record_check", check_id=check_id, screen_id=check.screen_id, record_check=check)
+    for check in config.batch_checks:
+        if check.check_id == check_id:
+            return CheckTarget(kind="batch_check", check_id=check_id, screen_id=check.screen_id, batch_check=check)
+    return None
+
 def _error(source: Path, field_name: str, message: str) -> HarvestError:
     return HarvestError(E_VALIDATION_CONFIG, message, context={"file": str(source), "field": field_name})
 

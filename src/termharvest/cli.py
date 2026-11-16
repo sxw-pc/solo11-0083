@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import AUTHORIZED_USE_NOTICE, __version__
 from .config import load_screens_dir, load_session
+from .counterexample import DEFAULT_MAX_CANDIDATES, generate_counterexample
 from .errors import HarvestError
 from .logging_util import build_logger
 from .mockhost import MockTerminalServer
@@ -49,6 +50,22 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--record-cassette")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
+
+    cex = sub.add_parser(
+        "counterexample",
+        help="generate a minimal single-check counterexample cassette",
+        description="从一份验证通过的 cassette 出发，定向构造只触发目标 check_id 的最小反例 cassette 与变更证明；全程离线。",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cex.add_argument("--session", required=True)
+    cex.add_argument("--screens", required=True)
+    cex.add_argument("--validators", required=True)
+    cex.add_argument("--cassette", required=True)
+    cex.add_argument("--check-id", required=True)
+    cex.add_argument("--strategy", choices=["auto", "fact", "amount"], default="auto", help="sum_equals 生成路线；默认 auto 依次尝试")
+    cex.add_argument("--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES)
+    cex.add_argument("--out", required=True)
     return parser
 
 def _serve(args: argparse.Namespace) -> int:
@@ -92,6 +109,26 @@ def _run(args: argparse.Namespace) -> int:
     print("RUN_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if summary["status"] == "success" else 1
 
+def _counterexample(args: argparse.Namespace) -> int:
+    session = load_session(args.session)
+    screens = load_screens_dir(args.screens)
+    validation_config = load_validation_config(args.validators)
+    result = generate_counterexample(
+        cassette_path=args.cassette,
+        session=session,
+        screens=screens,
+        validation_config=validation_config,
+        check_id=args.check_id,
+        strategy=None if args.strategy == "auto" else args.strategy,
+        max_candidates=args.max_candidates,
+        output_dir=args.out,
+    )
+    summary = result.to_dict()
+    summary["cassette"] = str(Path(result.cassette_path).resolve())
+    summary["proof"] = str(Path(result.proof_path).resolve())
+    print("COUNTEREXAMPLE_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -99,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
             return _serve(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "counterexample":
+            return _counterexample(args)
         return 2
     except HarvestError as exc:
         print(f"ERROR {exc.code}: {exc.message}", file=sys.stderr)

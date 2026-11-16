@@ -39,3 +39,15 @@ def validate_records(records: list[dict[str, Any]], config: ValidationConfig, *,
         "error_codes": sorted({item["code"] for item in errors}),
     }
     return ValidationResult(errors=errors, stats=stats)
+
+def all_rule_ids(config: ValidationConfig) -> list[str]:
+    """Every rule id the config can report, in declaration order."""
+    ids = [f"field:{screen_id}.{field_name}" for screen_id, rules in config.fields.items() for field_name in rules]
+    ids.extend(check.check_id for check in config.record_checks)
+    ids.extend(check.check_id for check in config.batch_checks)
+    return ids
+
+def rule_outcomes(config: ValidationConfig, errors: list[dict[str, Any]]) -> dict[str, str]:
+    """Map every configured rule id to "pass" or "fail" for one validation run."""
+    failed = {str(item.get("rule_id")) for item in errors}
+    return {rule_id: ("fail" if rule_id in failed else "pass") for rule_id in all_rule_ids(config)}
