@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from . import AUTHORIZED_USE_NOTICE, __version__
 from .config import load_screens_dir, load_session
@@ -13,6 +12,7 @@ from .errors import HarvestError
 from .logging_util import build_logger
 from .mockhost import MockTerminalServer
 from .pipeline import run_pipeline
+from .report import current_pointer, generation_dir
 from .store import Store
 from .validate_config import load_validation_config
 
@@ -49,6 +49,17 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--record-cassette")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
+
+    review = sub.add_parser(
+        "review", help="read-only review console for published generations",
+        description="只读复核台：查看当前已发布代、历史代及恢复状态，不触发任何采集。",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    review.add_argument("--db", default="data/termharvest.db")
+    review.add_argument("--out", default="data/report")
+    review.add_argument("--generation")
+    review.add_argument("--records", action="store_true", help="print the canonical record set as JSON")
+    review.add_argument("--key-changes", action="store_true", help="print identity relations of the selected generation")
     return parser
 
 def _serve(args: argparse.Namespace) -> int:
@@ -92,6 +103,29 @@ def _run(args: argparse.Namespace) -> int:
     print("RUN_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if summary["status"] == "success" else 1
 
+def _review(args: argparse.Namespace) -> int:
+    store = Store(args.db)
+    try:
+        status = store.snapshot_status()
+        gen_id = args.generation or status["current_generation_id"]
+        view = {
+            "snapshot": status,
+            "pointer": current_pointer(args.out),
+            "generation": store.generation(gen_id) if gen_id else None,
+            "generations": store.generations(),
+        }
+        if args.records:
+            view["records"] = store.records(generation_id=gen_id) if gen_id else []
+        if args.key_changes and gen_id:
+            view["key_changes"] = store.key_changes(gen_id)
+        if gen_id:
+            view["report_dir"] = str(generation_dir(args.out, gen_id))
+        print(json.dumps(view, ensure_ascii=False, sort_keys=True, indent=2), flush=True)
+        return 0 if status["published"] or gen_id else 2
+    finally:
+        store.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -99,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             return _serve(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "review":
+            return _review(args)
         return 2
     except HarvestError as exc:
         print(f"ERROR {exc.code}: {exc.message}", file=sys.stderr)

@@ -38,9 +38,11 @@ def extract_pages(
         pages_seen.append(seq)
         skipped.update(page.sensitive_skipped)
         for name, value in page.facts.items():
-            facts.setdefault(name, value)
+            # Footer totals are re-stated on every page; the latest page wins
+            # so a changed batch total is not masked by the first page's value.
+            facts[name] = value
         for name, value in page.facts_raw.items():
-            facts_raw.setdefault(name, value)
+            facts_raw[name] = value
         page_records = page.records
         if not page_records:
             stop_reason = "empty_page"

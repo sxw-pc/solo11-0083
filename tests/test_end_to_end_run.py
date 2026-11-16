@@ -7,7 +7,8 @@ import pytest
 from termharvest.clock import FixedClock
 from termharvest.errors import HarvestError
 from termharvest.pipeline import run_pipeline
-from termharvest.store import Store
+from termharvest.report import POINTER_NAME, current_pointer, generation_dir
+from termharvest.store import GEN_PUBLISHED, Store
 
 def test_live_pipeline_writes_ledger_and_reports(tmp_path, live_session, demo_screens, demo_validation, demo_paths):
     clock = FixedClock("2026-05-01T09:00:00.000Z")
@@ -23,7 +24,16 @@ def test_live_pipeline_writes_ledger_and_reports(tmp_path, live_session, demo_sc
         assert store.count_records() == 6
         assert store.count_frames(result["run_id"]) == 4
         assert store.count_frames() == 4
-        assert {item.name for item in (tmp_path / "report").iterdir()} == {"report.html", "report.json", "report.md", "report_summary.json", "records.csv"}
+        gen_id = result["generation_id"]
+        final_dir = generation_dir(tmp_path / "report", gen_id)
+        assert {item.name for item in final_dir.iterdir()} == {
+            "report.html", "report.json", "report.md", "report_summary.json", "records.csv", "manifest.json"
+        }
+        pointer = current_pointer(tmp_path / "report")
+        assert pointer is not None
+        assert pointer["generation_id"] == gen_id
+        assert pointer["records_sha256"] == summary["records_sha256"]
+        assert (tmp_path / "report" / POINTER_NAME).is_file()
         event_types = {event["event_type"] for event in store.events()}
         assert {"target_validated", "connection_open", "key_sent", "frame_received", "frame_stored", "run_completed"} <= event_types
         assert all(len(event["event_sha256"]) == 64 for event in store.events())
@@ -31,8 +41,12 @@ def test_live_pipeline_writes_ledger_and_reports(tmp_path, live_session, demo_sc
         db_text = json.dumps(record_rows, ensure_ascii=False)
         assert "SYNTH-PLACEHOLDER" not in db_text
         assert "operator_token" not in db_text
-        report_text = (tmp_path / "report" / "report.json").read_text(encoding="utf-8")
+        report_text = (final_dir / "report.json").read_text(encoding="utf-8")
         assert "SYNTH-PLACEHOLDER" not in report_text
+        generation = store.generation(gen_id)
+        assert generation["status"] == GEN_PUBLISHED
+        assert generation["records_sha256"] == summary["records_sha256"]
+        assert store.snapshot_status()["current_generation_id"] == gen_id
     finally:
         store.close()
 
@@ -44,9 +58,13 @@ def test_rerun_is_idempotent_for_records(tmp_path, live_session, demo_screens, d
         first = run_pipeline(**kwargs)
         second = run_pipeline(**kwargs)
         assert first["run_id"] == second["run_id"]
+        assert first["generation_id"] == second["generation_id"]
         assert store.count_records() == 6
         assert store.count_frames() == 4
         assert len(store.runs()) == 1
+        assert len(store.generations()) == 1
+        assert store.generations()[0]["status"] == GEN_PUBLISHED
+        assert current_pointer(tmp_path / "report")["generation_id"] == first["generation_id"]
     finally:
         store.close()
 
@@ -90,8 +108,19 @@ def test_non_loopback_override_is_audited(tmp_path, live_session, demo_screens, 
         event_codes = [event["code"] for event in store.events()]
         assert "E_TARGET_NOT_ALLOWED" in event_codes
         assert store.runs()[0]["status"] == "failed"
-        summary = json.loads((tmp_path / "report" / "report_summary.json").read_text(encoding="utf-8"))
+        status = store.snapshot_status()
+        assert status["published"] is False
+        assert status["current_generation_id"] is None
+        # First-ever failure must expose "no published snapshot", never partial rows.
+        assert store.records() == []
+        assert store.count_records() == 0
+        assert len(status["abandoned_generations"]) == 1
+        run_id = store.runs()[0]["run_id"]
+        failure_summary = tmp_path / "report" / "failed" / run_id / "report_summary.json"
+        summary = json.loads(failure_summary.read_text(encoding="utf-8"))
         assert summary["status"] == "failed"
         assert summary["error_codes"] == ["E_TARGET_NOT_ALLOWED"]
+        # No public pointer exists for a never-published run.
+        assert current_pointer(tmp_path / "report") is None
     finally:
         store.close()

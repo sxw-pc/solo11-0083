@@ -51,11 +51,40 @@ python -m termharvest.cli serve-mock \
 
 演示输出在 `data/`：
 
-- `data/termharvest.db`：SQLite 台账（run、frame、record、event）；
-- `data/report/`：`report.json`、`report_summary.json`、`records.csv`、
-  `report.md`、`report.html`；
-- `data/report_replay/`：回放模式报告，用于和 live 记录交叉核验；
+- `data/termharvest.db`：SQLite 台账（run、generation、不可变 record_version、
+  frame、event，以及单行 `ledger_state` 当前发布代指针）；
+- `data/report/current.json`：当前已发布代的文件系统指针（另有 `current` 符号链接）；
+- `data/report/generations/<generation_id>/`：每个发布代各自独立、不可变的报告目录
+  （`report.json`、`report_summary.json`、`records.csv`、`report.md`、
+  `report.html` 与记录逐文件哈希的 `manifest.json`）；
+- `data/report/failed/<run_id>/`：失败轮的诊断报告，不覆盖当前发布指针；
+- `data/report/_staging/`：发布前的私有暂存目录，崩溃后由恢复协议自动清理或隔离到
+  `_recovered/`，无需人工介入；
 - `data/evidence/`：异常屏幕原始帧证据（仅在失败时产生）。
+
+### 发布代协议（prepare / publish / recover）
+
+一次采集对应一个**发布代（generation）**，记录、帧证据、校验结论和报告作为一个整体
+对外可见：
+
+1. **prepare**：记录暂存到该代私有的 `record_versions` 分区（不覆盖任何旧代），报告
+   写入 `_staging/<generation_id>/`，最后原子生成带逐文件 SHA-256 的 `manifest.json`；
+2. **publish**：SQLite 单事务内写入全量记录、与父代的键身份关系
+   （`inserted` / `updated` / `unchanged` / `retired` 及跨页重复的 `occurrence_count`），
+   把代置为 `published` 并切换 `ledger_state` 指针；随后原子重命名报告目录并替换
+   `current.json`；
+3. **recover**：下次打开台账时自动协调——报告写一半则隔离暂存目录并放弃该代；文件齐全
+   而数据库未切换则补发布；数据库已切换而指针缺失则重建指针。只读查询始终沿
+   `ledger_state` 指针，因此失败轮的半轮结果永远不会被当成当前有效快照；首次采集失败时
+   明确呈现“无已发布快照”。旧的成功代不可变、可持续按代回看。
+
+只读复核台（不触发任何采集，回放输入也不接触外部主机）：
+
+```bash
+python -m termharvest.cli review --db data/termharvest.db --out data/report
+python -m termharvest.cli review --db data/termharvest.db --out data/report \
+  --generation <generation_id> --records --key-changes
+```
 
 也可直接运行一次采集（需已有 loopback 终端）：
 
