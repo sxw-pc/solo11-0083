@@ -13,6 +13,7 @@ from .config_types import ScreenContract, SessionContract
 from .errors import HarvestError
 from .logging_util import safe_context
 from .pipeline_steps import _collect, _extract_all, make_run_id
+from .redaction import SCOPE_SPAN, export_redacted_package
 from .report import build_report_payload, write_reports
 from .store import Store
 from .validate import ValidationResult, validate_records
@@ -35,6 +36,8 @@ def run_pipeline(
     host_override: str | None = None,
     port_override: int | None = None,
     record_cassette: str | Path | None = None,
+    redact_package: str | Path | None = None,
+    redact_scope: str = SCOPE_SPAN,
     logger: Any = None,
 ) -> dict[str, Any]:
     clock = clock or SystemClock()
@@ -80,6 +83,24 @@ def run_pipeline(
         records = [record for extraction in extractions for record in extraction.records]
         facts = {extraction.screen_id: extraction.facts for extraction in extractions}
         validation = validate_records(records, validation_config, facts_by_screen=facts)
+        redaction_summary: dict[str, Any] | None = None
+        if redact_package is not None:
+            redaction_summary = export_redacted_package(
+                redact_package,
+                frames=frames,
+                screens=screens,
+                session=effective,
+                validation_config=validation_config,
+                scope=redact_scope,
+                captured_by="live" if mode == "live" else "replay",
+            )
+            sink(
+                "info",
+                "redact_package_exported",
+                None,
+                "redacted package exported without sensitive values",
+                {"package": redaction_summary["package"], "scope": redaction_summary["scope"], "frames": redaction_summary["frames"], "redacted_fields": redaction_summary["redacted_fields"]},
+            )
         invalid_keys = {item["record_key"] for item in validation.errors if item.get("record_key")}
         for record in records:
             record["validation_status"] = "invalid" if record.get("record_key") in invalid_keys else "valid"
@@ -112,7 +133,10 @@ def run_pipeline(
         )
         sink("info" if validation.ok else "error", "run_completed", None if validation.ok else validation.errors[0]["code"], "pipeline run completed", {"status": status, "record_count": len(records)})
         written = write_reports(output, payload)
-        return {"run_id": run_id, "payload": payload, **written}
+        result: dict[str, Any] = {"run_id": run_id, "payload": payload, **written}
+        if redaction_summary is not None:
+            result["redact_package"] = redaction_summary
+        return result
     except HarvestError as exc:
         finished_at = clock.now_iso()
         sink("error", "run_failed", exc.code, exc.message, {"context": exc.context})

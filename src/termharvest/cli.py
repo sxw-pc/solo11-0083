@@ -47,8 +47,24 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--port", type=int)
     run.add_argument("--evidence-dir")
     run.add_argument("--record-cassette")
+    run.add_argument("--redact-package", help="write a redacted package (no sensitive values) for verifiers")
+    run.add_argument("--redact-scope", choices=["span", "row"], default="span", help="redact only the sensitive value spans or their whole rows")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
+
+    verify = sub.add_parser(
+        "verify-redacted",
+        help="verify and replay a redacted package offline",
+        description="离线核验脱敏拾屏包：校验脱敏帧摘要、契约摘要、投影指纹、帧序与 trailer，并重放非敏感抽取与批量校验。",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    verify.add_argument("--package", required=True)
+    verify.add_argument("--screens", required=True)
+    verify.add_argument("--session", required=True)
+    verify.add_argument("--validators")
+    verify.add_argument("--log-level", default="INFO")
+    verify.add_argument("--log-file")
     return parser
 
 def _serve(args: argparse.Namespace) -> int:
@@ -84,6 +100,8 @@ def _run(args: argparse.Namespace) -> int:
             host_override=args.host,
             port_override=args.port,
             record_cassette=args.record_cassette,
+            redact_package=args.redact_package,
+            redact_scope=args.redact_scope,
             logger=logger,
         )
     finally:
@@ -92,6 +110,16 @@ def _run(args: argparse.Namespace) -> int:
     print("RUN_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if summary["status"] == "success" else 1
 
+def _verify_redacted(args: argparse.Namespace) -> int:
+    from .redaction import verify_redacted_package
+
+    session = load_session(args.session)
+    screens = load_screens_dir(args.screens)
+    validation_config = load_validation_config(args.validators) if args.validators else None
+    summary = verify_redacted_package(args.package, screens=screens, session=session, validation_config=validation_config)
+    print("VERIFY_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -99,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
             return _serve(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "verify-redacted":
+            return _verify_redacted(args)
         return 2
     except HarvestError as exc:
         print(f"ERROR {exc.code}: {exc.message}", file=sys.stderr)

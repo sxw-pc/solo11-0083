@@ -128,6 +128,47 @@ data/             运行期产物（已 gitignore）
 敏感字段（如 fixture 中的 `operator_token`）默认不抽取、不进入记录也不落库；
 屏幕原始帧仍作为完整证据留存，其中的 token 是明显的合成占位文本。
 
+## 脱敏拾屏包（可交付核验者）
+
+`store_frame()` 与 `write_cassette()` 会把整屏原文写入本地台账与回放文件——
+只跳过结构化字段并不能阻止屏上令牌进入共享证据。脱敏拾屏包是另一种产物：
+原始帧只在本地内存中完成契约核验，导出的 JSONL 包可交给无权查看敏感字段的
+核验者离线回放非敏感抽取结果，敏感值不会进入包、报告或错误上下文。
+
+```bash
+# 采集时导出（live 或 replay 均可）；--redact-scope 选 span（默认）或 row
+python -m termharvest.cli run ... --redact-package out/pkg.jsonl --redact-scope span
+
+# 核验者离线核验：帧摘要、契约摘要、投影指纹、帧序、trailer、非敏感结果重放
+python -m termharvest.cli verify-redacted \
+  --package out/pkg.jsonl --screens contracts/screens \
+  --session contracts/sessions/demo_session.yaml \
+  --validators contracts/validators/demo_rules.yaml
+```
+
+**定位与拒绝**：按屏幕契约的 `absolute`、`label/right`、`label/next_line`、
+`multiline` 定位器把敏感值解析为 24×80 网格中的字符跨度，只遮挡值跨度，
+保留标签与非敏感单元格。以下情况拒绝导出（错误含屏幕、字段、位置，不含原值）：
+标签在多行或同行重复（`E_REDACT_LABEL_AMBIGUOUS`）、定位器越出网格
+（`E_REDACT_LOCATOR_OUT_OF_BOUNDS`）、敏感跨度与必需非敏感字段或 match 片段重叠
+（`E_REDACT_OVERLAP`）、敏感值在声明跨度之外仍出现（`E_REDACT_RESIDUAL_VALUE`）。
+绝不猜测该遮挡哪一处。
+
+**两种共享范围**：`span` 精确遮挡敏感值跨度（同行无关状态标记仍可见）；
+`row` 遮挡敏感值所在整行（同行标记不公开）。两者对其余非敏感字段的回放结论一致
+（`results_sha256` 相同）。若整行策略会遮挡必需非敏感字段，则拒绝整行导出，
+不悄悄产生不完整报告。
+
+**摘要模型**：逐帧记录 `source_frame_sha256`（原始帧摘要，来源声明，无法从脱敏包
+重新验证）与 `redacted_sha256`（脱敏帧摘要，可自行验证）；包头绑定屏幕契约摘要
+与脱敏规则版本，二者不与帧内容摘要混作同一种完整性证明。遮挡后的每一帧仍是合法
+24×80 帧。
+
+**回放核验**：校验脱敏帧摘要、契约摘要（契约漂移即拒绝）、规则版本、帧序与
+trailer，重新运行非敏感字段抽取与批量校验，并与导出时记录的非敏感结果摘要比对；
+敏感字段在回放结果中始终缺席。对带整屏指纹的旧契约，不拿脱敏帧去比原始整屏哈希，
+改为独立校验非敏感可见单元格的投影指纹；无法解析敏感跨度的旧契约帧会被明确拒绝。
+
 ## 契约格式
 
 屏幕契约示例（完整文件见 `contracts/screens/`）：
@@ -206,6 +247,10 @@ list_region:
 | `E_SCREEN_FINGERPRINT_MISMATCH` | 指纹不一致 |
 | `E_FIELD_*` / `E_RECORD_CONSISTENCY` / `E_BATCH_*` | 字段/记录/批次校验失败 |
 | `E_CASSETTE_*` | cassette 解析、顺序或完整性失败 |
+| `E_REDACT_LABEL_AMBIGUOUS` / `E_REDACT_LOCATOR_OUT_OF_BOUNDS` | 敏感标签重复或定位器越界，拒绝导出 |
+| `E_REDACT_OVERLAP` / `E_REDACT_RESIDUAL_VALUE` | 遮挡会覆盖必需非敏感内容，或敏感值在声明跨度外残留 |
+| `E_REDACT_CONTRACT_MISMATCH` | 脱敏包契约摘要或规则版本与本地不一致 |
+| `E_REDACT_PACKAGE_*` | 脱敏包解析、摘要、帧序或 trailer 校验失败 |
 
 配置错误优先于网络行为；只有 loopback 目标才可能进入连接阶段。
 
