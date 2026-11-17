@@ -1,0 +1,30 @@
+version: 1
+description: Manual-review ownership exposure rule; inconclusive pages keep a safe witness for reviewers but are never promoted to pass.
+fields:
+  demo_synth_bills:
+    bill_id: {required: true, type: string, pattern: "^B[0-9]{6}$"}
+    bill_date: {required: true, type: date, format: "%Y-%m-%d"}
+    amount: {required: true, type: decimal, min: 0}
+    status: {required: true, type: string, enum: [OPEN, PAID, VOID]}
+    customer_ref: {required: false, type: string}
+  demo_customer:
+    customer_id: {required: true, type: string, pattern: "^C[0-9]{5}$"}
+    credit_limit: {required: true, type: decimal, min: 0}
+ownership_checks:
+  - id: target_a_open_exposure_review
+    screen_id: demo_synth_bills
+    target_bucket: A
+    purpose: manual_review
+    mask_field: customer_ref
+    id_field: bill_id
+    amount_field: amount
+    status_field: status
+    open_statuses: [OPEN]
+    tolerance: 0.001
+    max_bills: 24
+    search_budget: 200000
+    credit_limit_field: {screen_id: demo_customer, field: credit_limit}
+    bucket_footers:
+      - {bucket: A, count_fact: a_count, total_fact: a_total}
+      - {bucket: B, count_fact: b_count, total_fact: b_total}
+    message: no globally feasible bill-to-bucket assignment matches the trusted footers

@@ -30,7 +30,9 @@ def build_report_payload(
     validation: ValidationResult,
     records: list[dict[str, Any]],
     errors: list[dict[str, Any]],
+    ownership_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    ownership_results = ownership_results or []
     frames_by_screen: dict[str, int] = {}
     for item in frames:
         frames_by_screen[item.expected_screen] = frames_by_screen.get(item.expected_screen, 0) + 1
@@ -68,6 +70,22 @@ def build_report_payload(
         "screens": screen_rows,
         "pagination": page_details,
         "validation": validation.stats,
+        "credit_exposure": [
+            {
+                "check_id": item["check_id"],
+                "screen_id": item["screen_id"],
+                "target_bucket": item["target_bucket"],
+                "purpose": item["purpose"],
+                "status": item["status"],
+                "credit_state": item.get("credit_state"),
+                "credit_action": item.get("credit_action"),
+                "open_minimum": item.get("open_minimum"),
+                "open_maximum": item.get("open_maximum"),
+                "credit_limit": item.get("credit_limit"),
+                "reason": item.get("reason"),
+            }
+            for item in ownership_results
+        ],
         "sensitive_fields_skipped": sensitive,
         "report_files": ["report.html", "report.json", "report.md", "report_summary.json", "records.csv"],
     }
@@ -88,6 +106,7 @@ def build_report_payload(
         "summary": summary,
         "records": record_rows,
         "errors": errors,
+        "credit_exposure": ownership_results,
         "captured_frames": [{"frame_seq": item.frame_seq, "step_id": item.step_id, "screen_id": item.expected_screen, "frame_sha256": item.frame.sha256} for item in frames],
     }
 

@@ -1,0 +1,21 @@
+version: 1
+screen_id: demo_synth_bills
+description: Synthetic masked bill ownership screen (fixture only).
+match: [SYNTH BILL OWNERSHIP, BILL ID]
+primary_key: [bill_id]
+list_region:
+  start_row: 5
+  end_row: 15
+  step: 1
+  skip_blank: true
+  columns:
+    bill_id: {start: 1, end: 11}
+    bill_date: {start: 12, end: 23}
+    amount: {start: 25, end: 36}
+    status: {start: 38, end: 48}
+    customer_ref: {start: 50, end: 70}
+summary_fields:
+  - {name: a_count, locator: {kind: label, label: BUCKET A COUNT, search_rows: [19, 19], direction: right, length: 8}}
+  - {name: a_total, locator: {kind: label, label: BUCKET A TOTAL, search_rows: [20, 20], direction: right, length: 16}}
+  - {name: b_count, locator: {kind: label, label: BUCKET B COUNT, search_rows: [21, 21], direction: right, length: 8}}
+  - {name: b_total, locator: {kind: label, label: BUCKET B TOTAL, search_rows: [22, 22], direction: right, length: 16}}

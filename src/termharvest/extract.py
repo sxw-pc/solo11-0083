@@ -19,10 +19,11 @@ class Extraction:
     records: list[dict[str, Any]] = field(default_factory=list)
     facts: dict[str, str | None] = field(default_factory=dict)
     facts_raw: dict[str, str] = field(default_factory=dict)
+    fact_sources: dict[str, dict[str, int | str]] = field(default_factory=dict)
     sensitive_skipped: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"screen_id": self.screen_id, "frame_seq": self.frame_seq, "frame_sha256": self.frame_sha256, "records": self.records, "facts": self.facts, "sensitive_skipped": self.sensitive_skipped}
+        return {"screen_id": self.screen_id, "frame_seq": self.frame_seq, "frame_sha256": self.frame_sha256, "records": self.records, "facts": self.facts, "fact_sources": self.fact_sources, "sensitive_skipped": self.sensitive_skipped}
 
 def _locate(frame: ScreenFrame, locator: Locator, field_name: str) -> str:
     data = locator.data
@@ -64,9 +65,31 @@ def _locate(frame: ScreenFrame, locator: Locator, field_name: str) -> str:
 
     raise HarvestError(E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, f"unsupported locator kind {locator.kind!r}", context={"field": field_name})
 
-def _extract_fields(frame: ScreenFrame, fields: tuple[ScreenField, ...], *, skipped: list[str]) -> tuple[dict[str, str], dict[str, str | None]]:
+def locate_source(frame: ScreenFrame, locator: Locator) -> dict[str, int | str]:
+    """Frame row/column where a locator reads from; provenance only, never keyed."""
+    data = locator.data
+    if locator.kind == "absolute":
+        return {"row": data["row"], "col": data["col"], "frame_sha256": frame.sha256}
+    if locator.kind == "label":
+        first, last = data["search_rows"]
+        row_index = find_label_row(frame, data["label"], first, last)
+        if row_index is None:
+            return {"row": first, "col": 0, "frame_sha256": frame.sha256}
+        if data["direction"] == "right":
+            col = frame.rows[row_index].find(data["label"]) + len(data["label"])
+            while col < 80 and frame.rows[row_index][col] in " :\t":
+                col += 1
+        else:
+            col = data["col"] or 0
+        return {"row": row_index, "col": col, "frame_sha256": frame.sha256}
+    if locator.kind == "multiline":
+        return {"row": data["rows"][0], "col": data["col"], "frame_sha256": frame.sha256}
+    return {"row": 0, "col": 0, "frame_sha256": frame.sha256}
+
+def _extract_fields(frame: ScreenFrame, fields: tuple[ScreenField, ...], *, skipped: list[str]) -> tuple[dict[str, str], dict[str, str | None], dict[str, dict[str, int | str]]]:
     raw_values: dict[str, str] = {}
     normalized: dict[str, str | None] = {}
+    sources: dict[str, dict[str, int | str]] = {}
     for item in fields:
         if item.sensitive:
             skipped.append(item.name)
@@ -74,7 +97,8 @@ def _extract_fields(frame: ScreenFrame, fields: tuple[ScreenField, ...], *, skip
         raw = _locate(frame, item.locator, item.name)
         raw_values[item.name] = raw
         normalized[item.name] = normalize_value(raw, item.normalize)
-    return raw_values, normalized
+        sources[item.name] = locate_source(frame, item.locator)
+    return raw_values, normalized, sources
 
 def make_record_key(screen_id: str, primary_key: tuple[str, ...] | list[str], normalized_values: dict[str, str | None], raw_values: dict[str, str]) -> str:
     """Stable natural key; falls back to canonical raw content."""
@@ -112,7 +136,12 @@ def _list_page_records(frame: ScreenFrame, contract: ScreenContract, frame_seq: 
         if not any(value for value in raw.values()):
             continue
         normalized = {column.name: normalize_value(raw[column.name], ("trim", "collapse_space", "fullwidth_digits")) for column in region.columns}
-        records.append(_record(contract, frame, frame_seq, raw, normalized))
+        record = _record(contract, frame, frame_seq, raw, normalized)
+        record["field_sources"] = {
+            column.name: {"row": row_index, "col": column.start, "end_col": column.end, "frame_sha256": frame.sha256}
+            for column in region.columns
+        }
+        records.append(record)
     return records
 
 def extract_screen(frame: ScreenFrame, contract: ScreenContract, frame_seq: int, *, stop_marker: str | None = None) -> Extraction:
@@ -121,6 +150,7 @@ def extract_screen(frame: ScreenFrame, contract: ScreenContract, frame_seq: int,
     skipped: list[str] = []
     facts_raw: dict[str, str] = {}
     facts: dict[str, str | None] = {}
+    fact_sources: dict[str, dict[str, int | str]] = {}
     for item in contract.summary_fields:
         if item.sensitive:
             skipped.append(item.name)
@@ -128,14 +158,17 @@ def extract_screen(frame: ScreenFrame, contract: ScreenContract, frame_seq: int,
         raw = _locate(frame, item.locator, item.name)
         facts_raw[item.name] = raw
         facts[item.name] = normalize_value(raw, item.normalize)
+        fact_sources[item.name] = locate_source(frame, item.locator)
 
-    result = Extraction(screen_id=contract.screen_id, frame_seq=frame_seq, frame_sha256=frame.sha256, facts=facts, facts_raw=facts_raw, sensitive_skipped=sorted(set(skipped)))
+    result = Extraction(screen_id=contract.screen_id, frame_seq=frame_seq, frame_sha256=frame.sha256, facts=facts, facts_raw=facts_raw, fact_sources=fact_sources, sensitive_skipped=sorted(set(skipped)))
     if contract.list_region is not None:
         result.records = _list_page_records(frame, contract, frame_seq, skipped, stop_marker)
         result.sensitive_skipped = sorted(set(skipped))
         return result
 
-    raw_values, normalized = _extract_fields(frame, contract.fields, skipped=skipped)
-    result.records = [_record(contract, frame, frame_seq, raw_values, normalized)]
+    raw_values, normalized, field_sources = _extract_fields(frame, contract.fields, skipped=skipped)
+    record = _record(contract, frame, frame_seq, raw_values, normalized)
+    record["field_sources"] = field_sources
+    result.records = [record]
     result.sensitive_skipped = sorted(set(skipped))
     return result

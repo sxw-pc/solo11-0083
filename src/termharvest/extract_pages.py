@@ -23,6 +23,7 @@ def extract_pages(
     seen_keys: set[str] = set()
     facts: dict[str, str | None] = {}
     facts_raw: dict[str, str] = {}
+    fact_sources: dict[str, dict] = {}
     skipped: set[str] = set()
     pages_seen: list[int] = []
     previous_first: str | None = None
@@ -41,6 +42,8 @@ def extract_pages(
             facts.setdefault(name, value)
         for name, value in page.facts_raw.items():
             facts_raw.setdefault(name, value)
+        for name, source in page.fact_sources.items():
+            fact_sources.setdefault(name, source)
         page_records = page.records
         if not page_records:
             stop_reason = "empty_page"
@@ -59,5 +62,5 @@ def extract_pages(
             stop_reason = "stop_marker"
             break
 
-    extraction = Extraction(screen_id=contract.screen_id, frame_seq=first_seq, frame_sha256=first_hash, records=records, facts=facts, facts_raw=facts_raw, sensitive_skipped=sorted(skipped))
+    extraction = Extraction(screen_id=contract.screen_id, frame_seq=first_seq, frame_sha256=first_hash, records=records, facts=facts, facts_raw=facts_raw, fact_sources=fact_sources, sensitive_skipped=sorted(skipped))
     return PagedExtraction(extraction=extraction, page_count=len(pages_seen), stop_reason=stop_reason, pages_seen=pages_seen)

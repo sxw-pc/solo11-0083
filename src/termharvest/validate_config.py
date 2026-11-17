@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,10 @@ from .errors import E_VALIDATION_CONFIG, HarvestError
 FIELD_TYPES = frozenset({"string", "integer", "decimal", "date"})
 OPS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte"})
 BATCH_CHECKS = frozenset({"unique_key", "duplicate_record", "non_empty", "sum_equals", "count_equals"})
+OWNERSHIP_PURPOSES = frozenset({"compliance", "manual_review"})
+DEFAULT_OPEN_STATUSES = ("OPEN",)
+DEFAULT_MAX_BILLS = 24
+DEFAULT_SEARCH_BUDGET = 200_000
 
 @dataclass(frozen=True)
 class FieldRule:
@@ -47,10 +52,42 @@ class BatchCheck:
     message: str = ""
 
 @dataclass(frozen=True)
+class BucketFooters:
+    """Trusted footer control facts for one ownership bucket."""
+
+    bucket: str
+    count_fact: str | None
+    total_fact: str | None
+
+@dataclass(frozen=True)
+class OwnershipCheck:
+    """Cross-screen masked bill -> customer bucket exposure rule."""
+
+    check_id: str
+    screen_id: str
+    target_bucket: str
+    buckets: tuple[str, ...]
+    mask_field: str
+    amount_field: str
+    status_field: str
+    id_field: str
+    open_statuses: tuple[str, ...]
+    footers: tuple[BucketFooters, ...]
+    tolerance: Decimal
+    max_bills: int
+    search_budget: int
+    purpose: str
+    credit_limit_value: Decimal | None
+    credit_limit_screen: str | None
+    credit_limit_field: str | None
+    message: str
+
+@dataclass(frozen=True)
 class ValidationConfig:
     fields: dict[str, dict[str, FieldRule]] = field(default_factory=dict)
     record_checks: tuple[RecordCheck, ...] = ()
     batch_checks: tuple[BatchCheck, ...] = ()
+    ownership_checks: tuple[OwnershipCheck, ...] = ()
 
 def _error(source: Path, field_name: str, message: str) -> HarvestError:
     return HarvestError(E_VALIDATION_CONFIG, message, context={"file": str(source), "field": field_name})
@@ -174,6 +211,105 @@ def _parse_batch_checks(raw: Any, source: Path) -> tuple[BatchCheck, ...]:
         )
     return tuple(checks)
 
+def _decimal(value: Any, source: Path, field_name: str, *, minimum: Decimal | None = None) -> Decimal:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise _error(source, field_name, "expected a decimal number") from None
+    if not number.is_finite():
+        raise _error(source, field_name, "expected a finite decimal number")
+    if minimum is not None and number < minimum:
+        raise _error(source, field_name, f"must be >= {minimum}")
+    return number
+
+def _parse_ownership_checks(raw: Any, source: Path) -> tuple[OwnershipCheck, ...]:
+    if raw is None:
+        return ()
+    checks: list[OwnershipCheck] = []
+    seen: set[str] = set()
+    for index, value in enumerate(list_value(raw, source, "ownership_checks")):
+        field_name = f"ownership_checks[{index}]"
+        item = mapping(value, source, field_name)
+        check_id = text(item.get("id"), source, f"{field_name}.id")
+        if check_id in seen:
+            raise _error(source, f"{field_name}.id", "duplicate check id")
+        seen.add(check_id)
+        screen_id = text(item.get("screen_id"), source, f"{field_name}.screen_id")
+        target_bucket = text(item.get("target_bucket"), source, f"{field_name}.target_bucket")
+        footers_raw = list_value(item.get("bucket_footers", []), source, f"{field_name}.bucket_footers")
+        if not footers_raw:
+            raise _error(source, f"{field_name}.bucket_footers", "bucket_footers must not be empty")
+        footers: list[BucketFooters] = []
+        buckets: list[str] = []
+        footer_buckets: set[str] = set()
+        for footer_index, footer_value in enumerate(footers_raw):
+            footer_path = f"{field_name}.bucket_footers[{footer_index}]"
+            footer_item = mapping(footer_value, source, footer_path)
+            bucket = text(footer_item.get("bucket"), source, f"{footer_path}.bucket")
+            if bucket in footer_buckets:
+                raise _error(source, f"{footer_path}.bucket", "duplicate bucket in bucket_footers")
+            footer_buckets.add(bucket)
+            count_fact = footer_item.get("count_fact")
+            total_fact = footer_item.get("total_fact")
+            if count_fact is None and total_fact is None:
+                raise _error(source, footer_path, "at least one of count_fact or total_fact is required")
+            footers.append(
+                BucketFooters(
+                    bucket=bucket,
+                    count_fact=None if count_fact is None else text(count_fact, source, f"{footer_path}.count_fact"),
+                    total_fact=None if total_fact is None else text(total_fact, source, f"{footer_path}.total_fact"),
+                )
+            )
+            buckets.append(bucket)
+        if target_bucket not in footer_buckets:
+            raise _error(source, f"{field_name}.target_bucket", "target_bucket must be declared in bucket_footers")
+        extra_buckets_raw = list_value(item.get("other_buckets", []), source, f"{field_name}.other_buckets")
+        for extra in extra_buckets_raw:
+            name = text(extra, source, f"{field_name}.other_buckets")
+            if name not in footer_buckets:
+                raise _error(source, f"{field_name}.other_buckets", f"bucket {name!r} is not declared in bucket_footers")
+        purpose = str(item.get("purpose", "compliance"))
+        if purpose not in OWNERSHIP_PURPOSES:
+            raise _error(source, f"{field_name}.purpose", f"purpose must be one of {sorted(OWNERSHIP_PURPOSES)}")
+        statuses_raw = list_value(item.get("open_statuses", list(DEFAULT_OPEN_STATUSES)), source, f"{field_name}.open_statuses")
+        open_statuses = tuple(text(entry, source, f"{field_name}.open_statuses[{i}]") for i, entry in enumerate(statuses_raw))
+        if not open_statuses:
+            raise _error(source, f"{field_name}.open_statuses", "open_statuses must not be empty")
+        has_limit_value = item.get("credit_limit") is not None
+        has_limit_field = item.get("credit_limit_field") is not None
+        if has_limit_value == has_limit_field:
+            raise _error(source, field_name, "exactly one of credit_limit or credit_limit_field is required")
+        credit_limit_value = _decimal(item.get("credit_limit"), source, f"{field_name}.credit_limit", minimum=Decimal("0")) if has_limit_value else None
+        credit_limit_screen = None
+        credit_limit_field = None
+        if has_limit_field:
+            limit_ref = mapping(item.get("credit_limit_field"), source, f"{field_name}.credit_limit_field")
+            credit_limit_screen = text(limit_ref.get("screen_id"), source, f"{field_name}.credit_limit_field.screen_id")
+            credit_limit_field = text(limit_ref.get("field"), source, f"{field_name}.credit_limit_field.field")
+        checks.append(
+            OwnershipCheck(
+                check_id=check_id,
+                screen_id=screen_id,
+                target_bucket=target_bucket,
+                buckets=tuple(buckets),
+                mask_field=text(item.get("mask_field", "customer_ref"), source, f"{field_name}.mask_field"),
+                amount_field=text(item.get("amount_field", "amount"), source, f"{field_name}.amount_field"),
+                status_field=text(item.get("status_field", "status"), source, f"{field_name}.status_field"),
+                id_field=text(item.get("id_field", "bill_id"), source, f"{field_name}.id_field"),
+                open_statuses=open_statuses,
+                footers=tuple(footers),
+                tolerance=_decimal(item.get("tolerance", 0.0), source, f"{field_name}.tolerance", minimum=Decimal("0")),
+                max_bills=integer(item.get("max_bills", DEFAULT_MAX_BILLS), source, f"{field_name}.max_bills", minimum=1),
+                search_budget=integer(item.get("search_budget", DEFAULT_SEARCH_BUDGET), source, f"{field_name}.search_budget", minimum=1),
+                purpose=purpose,
+                credit_limit_value=credit_limit_value,
+                credit_limit_screen=credit_limit_screen,
+                credit_limit_field=credit_limit_field,
+                message=str(item.get("message", "masked bill ownership exposure could not be proven")),
+            )
+        )
+    return tuple(checks)
+
 def load_validation_config(path: str | Path) -> ValidationConfig:
     source = Path(path)
     doc = load_yaml_document(source)
@@ -187,4 +323,9 @@ def load_validation_config(path: str | Path) -> ValidationConfig:
         for field_name, rule_raw in screen_rules.items():
             parsed[field_name] = _parse_field_rule(rule_raw, source, f"fields.{screen_id}.{field_name}")
         fields[screen_id] = parsed
-    return ValidationConfig(fields=fields, record_checks=_parse_record_checks(doc.get("record_checks"), source), batch_checks=_parse_batch_checks(doc.get("batch_checks"), source))
+    return ValidationConfig(
+        fields=fields,
+        record_checks=_parse_record_checks(doc.get("record_checks"), source),
+        batch_checks=_parse_batch_checks(doc.get("batch_checks"), source),
+        ownership_checks=_parse_ownership_checks(doc.get("ownership_checks"), source),
+    )

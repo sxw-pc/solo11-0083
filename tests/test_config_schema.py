@@ -43,19 +43,22 @@ steps:
 """
 
 def test_demo_contracts_load_with_expected_shapes(demo_screens, demo_session):
-    assert set(demo_screens) == {"demo_customer", "demo_bill_list"}
+    assert set(demo_screens) == {"demo_customer", "demo_bill_list", "demo_synth_bills"}
     customer = demo_screens["demo_customer"]
     bills = demo_screens["demo_bill_list"]
     assert customer.primary_key == ("customer_id",)
     assert any(field.sensitive for field in customer.fields)
     assert bills.list_region is not None
     assert [column.name for column in bills.list_region.columns] == ["bill_id", "bill_date", "amount", "status"]
+    synth = demo_screens["demo_synth_bills"]
+    assert [column.name for column in synth.list_region.columns] == ["bill_id", "bill_date", "amount", "status", "customer_ref"]
+    assert {field.name for field in synth.summary_fields} == {"a_count", "a_total", "b_count", "b_total"}
     assert len(demo_session.steps) == 3
     assert demo_session.paging is not None
     assert demo_session.paging.max_pages == 3
 
 def test_screens_directory_is_sorted_and_loaded(demo_screens):
-    assert list(demo_screens) == ["demo_bill_list", "demo_customer"]
+    assert list(demo_screens) == ["demo_bill_list", "demo_customer", "demo_synth_bills"]
 
 def test_yaml_parse_error_has_file_and_line(tmp_path):
     path = write_yaml(tmp_path, "bad.yaml", "screen_id: [unterminated\n")

@@ -79,7 +79,8 @@ def run_pipeline(
         extractions, page_details = _extract_all(frames, screens, effective)
         records = [record for extraction in extractions for record in extraction.records]
         facts = {extraction.screen_id: extraction.facts for extraction in extractions}
-        validation = validate_records(records, validation_config, facts_by_screen=facts)
+        fact_sources = {extraction.screen_id: extraction.fact_sources for extraction in extractions}
+        validation = validate_records(records, validation_config, facts_by_screen=facts, fact_sources_by_screen=fact_sources)
         invalid_keys = {item["record_key"] for item in validation.errors if item.get("record_key")}
         for record in records:
             record["validation_status"] = "invalid" if record.get("record_key") in invalid_keys else "valid"
@@ -100,6 +101,7 @@ def run_pipeline(
             validation=validation,
             records=records,
             errors=validation.errors,
+            ownership_results=validation.ownership_results,
         )
         store.finish_run(
             run_id,

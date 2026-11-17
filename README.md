@@ -169,6 +169,38 @@ list_region:
 会话脚本定义 `start`/`steps`/`paging`/`retry`/`target`。按键令牌为大写字母数字，
 例如 `ENTER`、`PF7`、`PF3`、`CLEAR`、`TAB`。客户端只发送按键，不发送任何业务写入。
 
+### 遮罩账单归属与授信暴露（ownership_checks）
+
+合成账单屏 `demo_synth_bills` 在普通列之外声明可选的遮罩列 `customer_ref`，
+并为每个客户桶（如目标客户 `A` 与其他桶 `B`）声明可信页脚的数量/金额控制数：
+
+```yaml
+list_region:
+  columns:
+    bill_id: {start: 1, end: 11}
+    amount: {start: 25, end: 36}
+    status: {start: 38, end: 48}
+    customer_ref: {start: 50, end: 70}   # 可选遮罩："A,B" / "*" / 留空
+summary_fields:
+  - {name: a_total, locator: {kind: label, label: BUCKET A TOTAL, ...}}
+  - {name: b_total, locator: {kind: label, label: BUCKET B TOTAL, ...}}
+```
+
+验证器用 `ownership_checks` 描述全局归属问题。每张账单依据遮罩形成候选桶边
+（留空或 `*` 表示可归任意桶，命名未知桶直接报 `E_OWNERSHIP_INVALID_MASK`），
+`PAID`/`VOID` 账单不贡献 OPEN 暴露但仍须一对一归属，重复 `bill_id` 报
+`E_OWNERSHIP_DUPLICATE_BILL`。求解器在“每张账单整轮只能赋给一个桶 + 各桶页脚
+count/total 必须与可信控制数一致”的全局可行域上做分支定界，给出目标桶 OPEN
+金额的可证明最小值、最大值及两端完整一对一分配见证；无可行分配时返回冲突核心
+（`E_OWNERSHIP_INFEASIBLE`）而非假装金额为零；账单数超过 `max_bills` 或搜索节点
+超过 `search_budget` 时返回 `unproven`，绝不猜测。授信判定仅当最大值不超过
+`credit_limit` 才 `safe`，仅当最小值已超限额才 `exceeds`，其余 `inconclusive`；
+`purpose: compliance` 对模糊页挂起人工复核，`purpose: manual_review` 可附一份
+限额内可行见证，但不会把“可能合格”升级为“确定合格”。每条见证都保留原 `record_key`
+与遮罩/页脚字段在帧内的行列来源（`field_sources` / `fact_sources`），且这些来源
+信息不参与 `record_key` 计算，跨 run 发布身份保持不变。不含 `ownership_checks` 的
+旧配置完全不进入该路径，原有单客户校验行为不变。
+
 ## 协议
 
 - 服务端连接后发送起始屏幕帧：24 行 × 80 列，UTF-8，以 `\x1e` 结束；
@@ -205,6 +237,9 @@ list_region:
 | `E_SCREEN_CONTRACT_MISMATCH` | 屏幕不满足屏幕契约 match |
 | `E_SCREEN_FINGERPRINT_MISMATCH` | 指纹不一致 |
 | `E_FIELD_*` / `E_RECORD_CONSISTENCY` / `E_BATCH_*` | 字段/记录/批次校验失败 |
+| `E_OWNERSHIP_INFEASIBLE` | 无任何全局一对一分配满足可信页脚，结果附冲突核心 |
+| `E_OWNERSHIP_INVALID_MASK` | `customer_ref` 引用了未声明的客户桶 |
+| `E_OWNERSHIP_DUPLICATE_BILL` | 重复 `bill_id` 无法做一对一归属 |
 | `E_CASSETTE_*` | cassette 解析、顺序或完整性失败 |
 
 配置错误优先于网络行为；只有 loopback 目标才可能进入连接阶段。

@@ -65,6 +65,26 @@ def render_markdown(payload: dict[str, Any]) -> str:
     else:
         value = json.dumps(payload["errors"], ensure_ascii=False, sort_keys=True, indent=2)
         lines.extend(["```json", value, "```"])
+    lines.extend(["", "## Credit Exposure", ""])
+    exposure = payload.get("credit_exposure") or []
+    if not exposure:
+        lines.append("_No ownership exposure checks configured._")
+    else:
+        lines.extend(["| check_id | target | purpose | status | credit_state | min | max | limit | action |", "| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |"])
+        for item in exposure:
+            lines.append(
+                "| {check_id} | {target} | {purpose} | {status} | {state} | {low} | {high} | {limit} | {action} |".format(
+                    check_id=_md_cell(item["check_id"]),
+                    target=_md_cell(item["target_bucket"]),
+                    purpose=_md_cell(item["purpose"]),
+                    status=_md_cell(item["status"]),
+                    state=_md_cell(str(item.get("credit_state") or "-")),
+                    low=_md_cell(str(item.get("open_minimum") if item.get("open_minimum") is not None else "-")),
+                    high=_md_cell(str(item.get("open_maximum") if item.get("open_maximum") is not None else "-")),
+                    limit=_md_cell(str(item.get("credit_limit") if item.get("credit_limit") is not None else "-")),
+                    action=_md_cell(str(item.get("credit_action") or "-")),
+                )
+            )
     lines.extend(
         [
             "",
@@ -109,6 +129,30 @@ def render_html(payload: dict[str, Any]) -> str:
             f"<td>{html.escape(screen['stop_reason'] or '-')}</td>"
             "</tr>"
         )
+    exposure = payload.get("credit_exposure") or []
+    if not exposure:
+        exposure_block = "<p>No ownership exposure checks configured.</p>"
+    else:
+        exposure_rows = []
+        for item in exposure:
+            exposure_rows.append(
+                "<tr>"
+                f"<td>{html.escape(item['check_id'])}</td>"
+                f"<td>{html.escape(item['target_bucket'])}</td>"
+                f"<td>{html.escape(item['purpose'])}</td>"
+                f"<td>{html.escape(item['status'])}</td>"
+                f"<td>{html.escape(str(item.get('credit_state') or '-'))}</td>"
+                f"<td>{html.escape(str(item.get('open_minimum') if item.get('open_minimum') is not None else '-'))}</td>"
+                f"<td>{html.escape(str(item.get('open_maximum') if item.get('open_maximum') is not None else '-'))}</td>"
+                f"<td>{html.escape(str(item.get('credit_limit') if item.get('credit_limit') is not None else '-'))}</td>"
+                f"<td>{html.escape(str(item.get('credit_action') or '-'))}</td>"
+                "</tr>"
+            )
+        exposure_block = (
+            "<table><thead><tr><th>check_id</th><th>target</th><th>purpose</th><th>status</th>"
+            "<th>credit_state</th><th>min</th><th>max</th><th>limit</th><th>action</th></tr></thead>"
+            f"<tbody>{''.join(exposure_rows)}</tbody></table>"
+        )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -141,6 +185,8 @@ pre {{ padding: 1rem; border: 1px solid #8888; overflow: auto; }}
 <tbody>{''.join(rows)}</tbody></table>
 <h2>Validation Errors</h2>
 {error_block}
+<h2>Credit Exposure</h2>
+{exposure_block}
 <h2>Provenance</h2>
 <p>Started {html.escape(summary['started_at'])}, finished {html.escape(summary['finished_at'])}.
 Frames captured {summary['frame_count']}, records extracted {summary['record_count']}.
