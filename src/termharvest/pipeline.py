@@ -15,11 +15,11 @@ from .logging_util import safe_context
 from .pipeline_steps import _collect, _extract_all, make_run_id
 from .report import build_report_payload, write_reports
 from .store import Store
-from .validate import ValidationResult, validate_records
-from .validate_config import ValidationConfig
+from .validate import STATUS_INVALID, STATUS_UNKNOWN, STATUS_VALID, ValidationResult, validate_records
+from .validate_config import PATTERN_POLICY_STRICT, ValidationConfig
 
 def _failure_stats() -> dict[str, Any]:
-    return {"records_in": 0, "records_valid": 0, "records_invalid": 0, "error_count": 0, "error_codes": []}
+    return {"records_in": 0, "records_valid": 0, "records_invalid": 0, "records_unknown": 0, "error_count": 0, "error_codes": []}
 
 def run_pipeline(
     *,
@@ -35,8 +35,14 @@ def run_pipeline(
     host_override: str | None = None,
     port_override: int | None = None,
     record_cassette: str | Path | None = None,
+    pattern_policy: str | None = None,
     logger: Any = None,
 ) -> dict[str, Any]:
+    policy = pattern_policy or validation_config.pattern_policy
+    # Formal collection gate: every configured field pattern must compile into
+    # the bounded matcher before any loopback connection or frame handling.
+    if policy == PATTERN_POLICY_STRICT:
+        validation_config.assert_patterns_decidable()
     clock = clock or SystemClock()
     output = Path(output_dir)
     evidence = Path(evidence_dir) if evidence_dir else output / "evidence"
@@ -79,13 +85,20 @@ def run_pipeline(
         extractions, page_details = _extract_all(frames, screens, effective)
         records = [record for extraction in extractions for record in extraction.records]
         facts = {extraction.screen_id: extraction.facts for extraction in extractions}
-        validation = validate_records(records, validation_config, facts_by_screen=facts)
+        validation = validate_records(records, validation_config, facts_by_screen=facts, pattern_policy=policy)
         invalid_keys = {item["record_key"] for item in validation.errors if item.get("record_key")}
+        unknown_keys = validation.unknown_record_keys
         for record in records:
-            record["validation_status"] = "invalid" if record.get("record_key") in invalid_keys else "valid"
-            per_record_errors = [item for item in validation.errors if item.get("record_key") == record.get("record_key")]
+            key = record.get("record_key")
+            if key in unknown_keys:
+                record["validation_status"] = STATUS_UNKNOWN
+            elif key in invalid_keys:
+                record["validation_status"] = STATUS_INVALID
+            else:
+                record["validation_status"] = STATUS_VALID
+            per_record_errors = [item for item in validation.errors if item.get("record_key") == key]
             store.upsert_record(record, validation_status=record["validation_status"], validation_errors=per_record_errors, run_id=run_id, clock=clock)
-        status = "success" if validation.ok else "failed"
+        status = "success" if validation.ok and not unknown_keys else "failed"
         finished_at = clock.now_iso()
         payload = build_report_payload(
             run_id=run_id,

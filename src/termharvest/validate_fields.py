@@ -7,8 +7,14 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from .errors import E_FIELD_ENUM, E_FIELD_FORMAT, E_FIELD_PATTERN, E_FIELD_RANGE, E_FIELD_REQUIRED, E_FIELD_TYPE
-from .validate_config import FieldRule, ValidationConfig
+from .bounded_regex import MATCH, PatternProgram, PatternRejection
+from .errors import E_FIELD_ENUM, E_FIELD_FORMAT, E_FIELD_PATTERN, E_FIELD_PATTERN_UNKNOWN, E_FIELD_RANGE, E_FIELD_REQUIRED, E_FIELD_TYPE
+from .validate_config import (
+    PATTERN_POLICY_DIAGNOSTIC,
+    PATTERN_POLICY_STRICT,
+    FieldRule,
+    ValidationConfig,
+)
 
 INTEGER_RE = re.compile(r"^-?[0-9]+$")
 
@@ -56,8 +62,22 @@ def _range_has(converted: Any, limit: float, *, below: bool) -> bool:
     except TypeError:
         return False
 
-def validate_field(screen_id: str, record: dict[str, Any], field_name: str, rule: FieldRule) -> list[dict[str, Any]]:
+def validate_field(
+    screen_id: str,
+    record: dict[str, Any],
+    field_name: str,
+    rule: FieldRule,
+    *,
+    pattern_policy: str = PATTERN_POLICY_STRICT,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Validate one field.
+
+    Returns ``(errors, undecidable)``.  ``undecidable`` is True only when the
+    configured pattern could not be compiled into the bounded matcher and the
+    diagnostic contract is in force: such a field is never counted as valid.
+    """
     errors: list[dict[str, Any]] = []
+    undecidable = False
     value = record.get("normalized_values", {}).get(field_name)
     rule_id = f"field:{screen_id}.{field_name}"
     record_key = record.get("record_key")
@@ -68,13 +88,26 @@ def validate_field(screen_id: str, record: dict[str, Any], field_name: str, rule
     if value is None or value == "":
         if rule.required:
             add(E_FIELD_REQUIRED, f"{field_name} is required")
-        return errors
+        return errors, undecidable
     valid, converted = coerce(rule, value)
     if not valid:
         add(E_FIELD_TYPE, f"{field_name} is not a valid {rule.type}")
-        return errors
-    if rule.pattern is not None and not re.fullmatch(rule.pattern, str(value)):
-        add(E_FIELD_PATTERN, f"{field_name} does not match {rule.pattern}")
+        return errors, undecidable
+    if rule.pattern is not None:
+        program = rule.pattern_program
+        if isinstance(program, PatternRejection):
+            undecidable = True
+            if pattern_policy == PATTERN_POLICY_DIAGNOSTIC:
+                add(
+                    E_FIELD_PATTERN_UNKNOWN,
+                    f"{field_name} pattern cannot be decided by the bounded matcher "
+                    f"({program.describe()}); field treated as unknown",
+                )
+            else:
+                # The strict gate in the pipeline must have prevented this.
+                add(E_FIELD_PATTERN_UNKNOWN, f"{field_name} pattern is undecidable: {program.describe()}")
+        elif isinstance(program, PatternProgram) and program.fullmatch(str(value)) != MATCH:
+            add(E_FIELD_PATTERN, f"{field_name} does not match {rule.pattern}")
     if rule.enum is not None and str(value) not in rule.enum:
         add(E_FIELD_ENUM, f"{field_name} must be one of {list(rule.enum)}")
     if rule.minimum is not None and _range_has(converted, rule.minimum, below=True):
@@ -83,7 +116,7 @@ def validate_field(screen_id: str, record: dict[str, Any], field_name: str, rule
         add(E_FIELD_RANGE, f"{field_name} is above {rule.maximum}")
     if rule.type == "date" and value != converted.strftime(rule.date_format):
         add(E_FIELD_FORMAT, f"{field_name} must use {rule.date_format}")
-    return errors
+    return errors, undecidable
 
 def convert_for_compare(config: ValidationConfig, screen_id: str, name: str, value: Any) -> Any:
     rule = config.fields.get(screen_id, {}).get(name)

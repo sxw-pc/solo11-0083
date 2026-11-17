@@ -14,7 +14,7 @@ from .logging_util import build_logger
 from .mockhost import MockTerminalServer
 from .pipeline import run_pipeline
 from .store import Store
-from .validate_config import load_validation_config
+from .validate_config import PATTERN_POLICY_DIAGNOSTIC, PATTERN_POLICY_STRICT, load_validation_config
 
 EPILOG = f"合规声明：{AUTHORIZED_USE_NOTICE}"
 
@@ -47,6 +47,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--port", type=int)
     run.add_argument("--evidence-dir")
     run.add_argument("--record-cassette")
+    run.add_argument(
+        "--pattern-policy",
+        choices=[PATTERN_POLICY_STRICT, PATTERN_POLICY_DIAGNOSTIC],
+        default=PATTERN_POLICY_STRICT,
+        help="strict: reject undecidable field patterns before connecting; "
+        "diagnostic: keep checking other fields and mark undecidable records as unknown",
+    )
+    run.add_argument("--state-budget", type=int, default=None, help="maximum epsilon-NFA states per field pattern")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
     return parser
@@ -69,7 +77,10 @@ def _run(args: argparse.Namespace) -> int:
     logger = build_logger("termharvest", level=args.log_level, log_file=args.log_file)
     session = load_session(args.session)
     screens = load_screens_dir(args.screens)
-    validation_config = load_validation_config(args.validators)
+    load_kwargs: dict[str, object] = {"pattern_policy": args.pattern_policy}
+    if args.state_budget is not None:
+        load_kwargs["state_budget"] = args.state_budget
+    validation_config = load_validation_config(args.validators, **load_kwargs)
     store = Store(args.db)
     try:
         result = run_pipeline(
@@ -84,6 +95,7 @@ def _run(args: argparse.Namespace) -> int:
             host_override=args.host,
             port_override=args.port,
             record_cassette=args.record_cassette,
+            pattern_policy=args.pattern_policy,
             logger=logger,
         )
     finally:

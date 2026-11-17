@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
+from .bounded_regex import (
+    DEFAULT_STATE_BUDGET,
+    PatternProgram,
+    PatternRejection,
+    compile_pattern,
+)
 from .config_util import integer, list_value, load_yaml_document, mapping, text
 from .errors import E_VALIDATION_CONFIG, HarvestError
 
@@ -15,15 +20,33 @@ FIELD_TYPES = frozenset({"string", "integer", "decimal", "date"})
 OPS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte"})
 BATCH_CHECKS = frozenset({"unique_key", "duplicate_record", "non_empty", "sum_equals", "count_equals"})
 
+#: Formal collection contract: every configured pattern must compile inside
+#: the state budget before any loopback connection is allowed.
+PATTERN_POLICY_STRICT = "strict"
+#: Offline diagnostics contract: undecidable patterns downgrade their field to
+#: ``unknown`` instead of blocking the rest of the configuration.
+PATTERN_POLICY_DIAGNOSTIC = "diagnostic"
+PATTERN_POLICIES = frozenset({PATTERN_POLICY_STRICT, PATTERN_POLICY_DIAGNOSTIC})
+
+#: Outcome of compiling one configured field pattern.
+PatternOutcome = Union[PatternProgram, PatternRejection]
+
+
 @dataclass(frozen=True)
 class FieldRule:
     required: bool = False
     type: str = "string"
     pattern: str | None = None
+    pattern_program: PatternOutcome | None = None
     enum: tuple[str, ...] | None = None
     minimum: float | None = None
     maximum: float | None = None
     date_format: str = "%Y-%m-%d"
+
+    @property
+    def pattern_decidable(self) -> bool:
+        """True when the pattern compiled into a bounded, safe matcher."""
+        return isinstance(self.pattern_program, PatternProgram)
 
 @dataclass(frozen=True)
 class RecordCheck:
@@ -51,6 +74,30 @@ class ValidationConfig:
     fields: dict[str, dict[str, FieldRule]] = field(default_factory=dict)
     record_checks: tuple[RecordCheck, ...] = ()
     batch_checks: tuple[BatchCheck, ...] = ()
+    pattern_policy: str = PATTERN_POLICY_STRICT
+    state_budget: int = DEFAULT_STATE_BUDGET
+
+    def undecidable_patterns(self) -> tuple[tuple[str, str, PatternRejection], ...]:
+        """Return (screen_id, field_name, rejection) for every unknown rule."""
+        found: list[tuple[str, str, PatternRejection]] = []
+        for screen_id, rules in self.fields.items():
+            for field_name, rule in rules.items():
+                if rule.pattern is not None and isinstance(rule.pattern_program, PatternRejection):
+                    found.append((screen_id, field_name, rule.pattern_program))
+        return tuple(found)
+
+    def assert_patterns_decidable(self) -> None:
+        """Strict contract gate: fail before collection if any pattern is unknown."""
+        undecidable = self.undecidable_patterns()
+        if not undecidable:
+            return
+        screen_id, field_name, rejection = undecidable[0]
+        raise HarvestError(
+            E_VALIDATION_CONFIG,
+            f"field pattern for {screen_id}.{field_name} cannot be decided within the "
+            f"state budget: {rejection.describe()}",
+            context={"screen_id": screen_id, "field": f"{screen_id}.{field_name}", "reason": rejection.reason, "position": rejection.position},
+        )
 
 def _error(source: Path, field_name: str, message: str) -> HarvestError:
     return HarvestError(E_VALIDATION_CONFIG, message, context={"file": str(source), "field": field_name})
@@ -65,19 +112,24 @@ def _number(value: Any, source: Path, field_name: str) -> float:
         raise _error(source, field_name, "expected a number")
     return float(value)
 
-def _parse_field_rule(raw: Any, source: Path, field_name: str) -> FieldRule:
+def _parse_field_rule(raw: Any, source: Path, field_name: str, *, pattern_policy: str, state_budget: int) -> FieldRule:
     item = mapping(raw, source, field_name)
     rule_type = item.get("type", "string")
     if rule_type not in FIELD_TYPES:
         raise _error(source, f"{field_name}.type", f"type must be one of {sorted(FIELD_TYPES)}")
     pattern = item.get("pattern")
+    pattern_program: PatternOutcome | None = None
     if pattern is not None:
         if not isinstance(pattern, str):
             raise _error(source, f"{field_name}.pattern", "pattern must be a string")
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise _error(source, f"{field_name}.pattern", f"invalid regex: {exc}") from exc
+        pattern_program = compile_pattern(pattern, state_budget=state_budget)
+        if isinstance(pattern_program, PatternRejection):
+            location = f"line {pattern_program.line} column {pattern_program.column}"
+            message = f"pattern is not decidable by the bounded matcher ({location}): {pattern_program.message}"
+            if pattern_policy == PATTERN_POLICY_STRICT:
+                raise _error(source, f"{field_name}.pattern", message)
+            # Diagnostic policy keeps the rejection on the rule so the field
+            # can be reported as unknown while other fields stay checkable.
     enum_raw = item.get("enum")
     enum = None
     if enum_raw is not None:
@@ -96,6 +148,7 @@ def _parse_field_rule(raw: Any, source: Path, field_name: str) -> FieldRule:
         required=_bool(item.get("required", False), source, f"{field_name}.required"),
         type=rule_type,
         pattern=pattern,
+        pattern_program=pattern_program,
         enum=enum,
         minimum=None if item.get("min") is None else _number(item.get("min"), source, f"{field_name}.min"),
         maximum=None if item.get("max") is None else _number(item.get("max"), source, f"{field_name}.max"),
@@ -174,7 +227,14 @@ def _parse_batch_checks(raw: Any, source: Path) -> tuple[BatchCheck, ...]:
         )
     return tuple(checks)
 
-def load_validation_config(path: str | Path) -> ValidationConfig:
+def load_validation_config(
+    path: str | Path,
+    *,
+    pattern_policy: str = PATTERN_POLICY_STRICT,
+    state_budget: int = DEFAULT_STATE_BUDGET,
+) -> ValidationConfig:
+    if pattern_policy not in PATTERN_POLICIES:
+        raise ValueError(f"pattern_policy must be one of {sorted(PATTERN_POLICIES)}")
     source = Path(path)
     doc = load_yaml_document(source)
     fields: dict[str, dict[str, FieldRule]] = {}
@@ -185,6 +245,18 @@ def load_validation_config(path: str | Path) -> ValidationConfig:
         screen_rules = mapping(rules_raw, source, f"fields.{screen_id}")
         parsed: dict[str, FieldRule] = {}
         for field_name, rule_raw in screen_rules.items():
-            parsed[field_name] = _parse_field_rule(rule_raw, source, f"fields.{screen_id}.{field_name}")
+            parsed[field_name] = _parse_field_rule(
+                rule_raw,
+                source,
+                f"fields.{screen_id}.{field_name}",
+                pattern_policy=pattern_policy,
+                state_budget=state_budget,
+            )
         fields[screen_id] = parsed
-    return ValidationConfig(fields=fields, record_checks=_parse_record_checks(doc.get("record_checks"), source), batch_checks=_parse_batch_checks(doc.get("batch_checks"), source))
+    return ValidationConfig(
+        fields=fields,
+        record_checks=_parse_record_checks(doc.get("record_checks"), source),
+        batch_checks=_parse_batch_checks(doc.get("batch_checks"), source),
+        pattern_policy=pattern_policy,
+        state_budget=state_budget,
+    )
