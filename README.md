@@ -88,7 +88,7 @@ scripts/
   run_demo.sh   一键演示
   make_fixtures.py  重新生成 24×80 场景与 cassette
 src/termharvest/  实现与 CLI
-tests/            65 个离线测试
+tests/            96 个离线测试
 data/             运行期产物（已 gitignore）
 ```
 
@@ -103,10 +103,33 @@ data/             运行期产物（已 gitignore）
    同时保留原始值与规范化值；敏感字段默认跳过。
 5. **翻页累计**：比较相邻页首行业务键、识别停止标记，重复记录不重复入库。
 6. **校验**：字段类型/必填/正则/枚举/范围/日期格式、跨字段一致性、
-   批次主键重复/重复记录/空结果/金额合计/条数一致。
+   批次主键重复/重复记录/空结果/金额合计/条数一致；每条规则产出可复核的
+   证据状态（见下节"校验证据状态"）。
 7. **存储**：SQLite 台账；`record_key` 唯一，重复运行是幂等的；原始屏幕帧
-   以 SHA-256 留存；事件带稳定上下文和 SHA-256。
-8. **报告**：JSON/CSV/Markdown/HTML；HTML 内联 CSS、自包含、无外部资源。
+   以 SHA-256 留存；事件带稳定上下文和 SHA-256；逐规则证据落
+   `validation_evidence` 表。
+8. **报告**：JSON/CSV/Markdown/HTML；HTML 内联 CSS、自包含、无外部资源；
+   `report.json` 含完整证据列表，`report_summary.json` 含四态计数。
+
+### 校验证据状态
+
+每条 `record_check` 对每条适用记录、每条 `sum_equals` 对本轮相应屏幕产出
+一条证据，状态四选一：
+
+- `proven_pass`：操作数完整有效且比较成立；
+- `proven_fail`：操作数完整有效且比较不成立（同时产生校验错误）；
+- `unknown`：字段缺失、类型不合法、非有限数、页脚缺失/非法或列表截断，
+  规则无法被证明——跳过不等于通过，部分求和也不等于页脚已核对；
+- `not_applicable`：规则声明了显式适用条件（`when`）且条件确定不满足。
+
+可选关系规则可声明 `when: {field: status, equals: OPEN}`（或 `in: [...]`）：
+条件本身无法确定时是 `unknown`，确定不满足才是 `not_applicable`；
+未声明 `when` 的规则缺操作数一律 `unknown`。
+
+本轮结论由合同策略决定：`policy: strict`（默认）要求全部适用规则
+`proven_pass` 才标 `success`，含 `unknown` 时为 `inconclusive`；
+`policy: investigation` 允许保留含 `unknown` 的诊断批次（`diagnostic`）
+供人工复核，但不会发布为已验证。存在确定违规时一律 `failed`。
 
 ### 抽取结果
 
@@ -220,7 +243,7 @@ pytest -q
 - 契约解析与全部配置错误码；
 - 帧协议半包/粘包/超长/非法编码/超时；
 - 屏幕匹配、标签/绝对/多行定位、翻页去重、指纹；
-- 字段/记录/批次校验与空结果；
+- 字段/记录/批次校验、空结果与四态证据（proven_pass/proven_fail/unknown/not_applicable）；
 - SQLite 幂等 upsert 与事件留证；
 - mock loopback 绑定拒绝、导航、`--once`、超时行为；
 - live/replay 端到端等价、非 loopback 审计；

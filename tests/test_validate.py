@@ -21,9 +21,13 @@ def test_expected_records_pass_all_rules(demo_validation, demo_paths):
     records = load_records(demo_paths["expected_records"])
     result = validate_records(records, demo_validation, facts_by_screen=FACTS)
     assert result.ok
+    assert result.run_status() == "success"
     assert result.stats["records_in"] == 6
     assert result.stats["records_valid"] == 6
     assert result.stats["records_invalid"] == 0
+    assert len(result.evidence) == 3
+    assert {item["status"] for item in result.evidence} == {"proven_pass"}
+    assert {item["rule_id"] for item in result.evidence} == {"balance_within_credit_limit", "period_starts_before_end", "bill_total_matches_detail"}
 
 def test_field_required_pattern_enum_and_range(demo_validation, demo_paths):
     records = load_records(demo_paths["expected_records"])
@@ -61,6 +65,9 @@ def test_cross_field_consistency(demo_validation, demo_paths):
     result = validate_records(records, demo_validation, facts_by_screen=FACTS)
     consistency = [item for item in result.errors if item["code"] == "E_RECORD_CONSISTENCY"]
     assert {item["rule_id"] for item in consistency} == {"balance_within_credit_limit", "period_starts_before_end"}
+    failed = [item for item in result.evidence if item["status"] == "proven_fail"]
+    assert {item["rule_id"] for item in failed} == {"balance_within_credit_limit", "period_starts_before_end"}
+    assert result.run_status() == "failed"
 
 def test_duplicate_key_and_duplicate_record(demo_validation, demo_paths):
     records = load_records(demo_paths["expected_records"])
@@ -78,14 +85,26 @@ def test_sum_mismatch(demo_validation, demo_paths):
     result = validate_records(records, demo_validation, facts_by_screen=FACTS)
     assert "E_BATCH_SUM_MISMATCH" in codes(result)
     assert "E_BATCH_COUNT_MISMATCH" not in codes(result)
+    sums = [item for item in result.evidence if item["rule_id"] == "bill_total_matches_detail"]
+    assert len(sums) == 1
+    assert sums[0]["status"] == "proven_fail"
+    assert sums[0]["total"] == "551.00"
+    assert sums[0]["expected"] == "550.00"
 
 def test_empty_batch(demo_validation):
     result = validate_records([], demo_validation, facts_by_screen={})
     assert "E_BATCH_EMPTY" in codes(result)
     assert result.stats["records_in"] == 0
 
-def test_missing_fact_is_explained(demo_validation, demo_paths):
+def test_missing_fact_is_unknown_not_a_fabricated_mismatch(demo_validation, demo_paths):
     records = load_records(demo_paths["expected_records"])
-    result = validate_records(records, demo_validation, facts_by_screen={})
-    assert "E_BATCH_SUM_MISMATCH" in codes(result)
-    assert any("missing" in error["message"] for error in result.errors)
+    facts = {"demo_bill_list": {"batch_count": "5"}}
+    result = validate_records(records, demo_validation, facts_by_screen=facts)
+    assert "E_BATCH_SUM_MISMATCH" not in codes(result)
+    assert not result.errors
+    sums = [item for item in result.evidence if item["rule_id"] == "bill_total_matches_detail"]
+    assert len(sums) == 1
+    assert sums[0]["status"] == "unknown"
+    assert "missing" in sums[0]["message"]
+    assert not result.ok
+    assert result.run_status() == "inconclusive"

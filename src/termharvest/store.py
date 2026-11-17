@@ -37,6 +37,7 @@ class Store:
         self.close()
 
     def start_run(self, run_id: str, session_id: str, mode: str, started_at: str) -> None:
+        self.connection.execute("DELETE FROM validation_evidence WHERE run_id=?", (run_id,))
         self.connection.execute(
             """INSERT INTO runs(run_id, session_id, mode, started_at, status)
                VALUES (?, ?, ?, ?, 'running')
@@ -131,6 +132,36 @@ class Store:
         )
         self.connection.commit()
         return "updated"
+
+    def store_evidence(self, run_id: str, evidence: list[dict[str, Any]]) -> None:
+        """Replace the run's rule-evidence rows; idempotent across reruns."""
+        rows = [
+            (
+                run_id,
+                str(item.get("rule_id")),
+                str(item.get("kind")),
+                str(item.get("screen_id")),
+                item.get("record_key"),
+                str(item.get("status")),
+                _json(item),
+            )
+            for item in evidence
+        ]
+        self.connection.execute("DELETE FROM validation_evidence WHERE run_id=?", (run_id,))
+        self.connection.executemany(
+            """INSERT INTO validation_evidence(run_id, rule_id, rule_kind,
+               screen_id, record_key, status, detail_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self.connection.commit()
+
+    def evidence(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        if run_id is None:
+            rows = self.connection.execute("SELECT * FROM validation_evidence ORDER BY evidence_id").fetchall()
+        else:
+            rows = self.connection.execute("SELECT * FROM validation_evidence WHERE run_id=? ORDER BY evidence_id", (run_id,)).fetchall()
+        return [dict(row) for row in rows]
 
     def count_records(self) -> int:
         return int(self.connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])

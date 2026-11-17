@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,6 +15,9 @@ from .errors import E_VALIDATION_CONFIG, HarvestError
 FIELD_TYPES = frozenset({"string", "integer", "decimal", "date"})
 OPS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte"})
 BATCH_CHECKS = frozenset({"unique_key", "duplicate_record", "non_empty", "sum_equals", "count_equals"})
+POLICIES = frozenset({"strict", "investigation"})
+POLICY_STRICT = "strict"
+POLICY_INVESTIGATION = "investigation"
 
 @dataclass(frozen=True)
 class FieldRule:
@@ -26,6 +30,19 @@ class FieldRule:
     date_format: str = "%Y-%m-%d"
 
 @dataclass(frozen=True)
+class WhenCondition:
+    """Explicit applicability condition for an optional record check.
+
+    The check only runs when ``field`` equals one of ``accepted``.  When the
+    condition field itself cannot be determined the rule is ``unknown``; when
+    the condition is determined and does not match, the rule is
+    ``not_applicable`` instead of being silently skipped.
+    """
+
+    field: str
+    accepted: tuple[Any, ...]
+
+@dataclass(frozen=True)
 class RecordCheck:
     check_id: str
     screen_id: str
@@ -34,6 +51,7 @@ class RecordCheck:
     right_field: str | None
     right_value: Any
     message: str
+    when: WhenCondition | None = None
 
 @dataclass(frozen=True)
 class BatchCheck:
@@ -51,6 +69,7 @@ class ValidationConfig:
     fields: dict[str, dict[str, FieldRule]] = field(default_factory=dict)
     record_checks: tuple[RecordCheck, ...] = ()
     batch_checks: tuple[BatchCheck, ...] = ()
+    policy: str = POLICY_STRICT
 
 def _error(source: Path, field_name: str, message: str) -> HarvestError:
     return HarvestError(E_VALIDATION_CONFIG, message, context={"file": str(source), "field": field_name})
@@ -102,7 +121,37 @@ def _parse_field_rule(raw: Any, source: Path, field_name: str) -> FieldRule:
         date_format=date_format,
     )
 
-def _parse_record_checks(raw: Any, source: Path) -> tuple[RecordCheck, ...]:
+def _coerce_literal(rule: FieldRule, value: Any) -> bool:
+    """Local coercion probe so ``when`` values can be checked at load time."""
+    from .validate_fields import coerce
+
+    valid, _converted = coerce(rule, value)
+    return valid
+
+def _parse_when(raw: Any, source: Path, field_name: str, fields: dict[str, dict[str, FieldRule]], screen_id: str) -> WhenCondition | None:
+    if raw is None:
+        return None
+    item = mapping(raw, source, field_name)
+    condition_field = text(item.get("field"), source, f"{field_name}.field")
+    has_equals = "equals" in item
+    has_in = "in" in item
+    if has_equals == has_in:
+        raise _error(source, field_name, "when requires exactly one of equals or in")
+    if has_equals:
+        accepted: tuple[Any, ...] = (item.get("equals"),)
+    else:
+        accepted_raw = list_value(item.get("in"), source, f"{field_name}.in")
+        if not accepted_raw:
+            raise _error(source, f"{field_name}.in", "in must not be empty")
+        accepted = tuple(accepted_raw)
+    rule = fields.get(screen_id, {}).get(condition_field)
+    if rule is not None:
+        for index, value in enumerate(accepted):
+            if not _coerce_literal(rule, value):
+                raise _error(source, f"{field_name}.accepted[{index}]", f"value {value!r} can never satisfy {condition_field} of type {rule.type}")
+    return WhenCondition(field=condition_field, accepted=accepted)
+
+def _parse_record_checks(raw: Any, source: Path, fields: dict[str, dict[str, FieldRule]]) -> tuple[RecordCheck, ...]:
     if raw is None:
         return ()
     checks: list[RecordCheck] = []
@@ -122,15 +171,21 @@ def _parse_record_checks(raw: Any, source: Path) -> tuple[RecordCheck, ...]:
         has_value = "right" in item
         if has_field == has_value:
             raise _error(source, field_name, "exactly one of right_field or right is required")
+        screen_id = text(item.get("screen_id"), source, f"{field_name}.screen_id")
+        if has_value:
+            left_rule = fields.get(screen_id, {}).get(left)
+            if left_rule is not None and not _coerce_literal(left_rule, item.get("right")):
+                raise _error(source, f"{field_name}.right", f"value {item.get('right')!r} can never compare against {left} of type {left_rule.type}")
         checks.append(
             RecordCheck(
                 check_id=check_id,
-                screen_id=text(item.get("screen_id"), source, f"{field_name}.screen_id"),
+                screen_id=screen_id,
                 left=left,
                 op=op,
                 right_field=(text(item.get("right_field"), source, f"{field_name}.right_field") if has_field else None),
                 right_value=item.get("right") if has_value else None,
                 message=str(item.get("message", f"{left} {op} right")),
+                when=_parse_when(item.get("when"), source, f"{field_name}.when", fields, screen_id),
             )
         )
     return tuple(checks)
@@ -160,6 +215,8 @@ def _parse_batch_checks(raw: Any, source: Path) -> tuple[BatchCheck, ...]:
         tolerance = _number(item.get("tolerance", 0.0), source, f"{field_name}.tolerance")
         if tolerance < 0:
             raise _error(source, f"{field_name}.tolerance", "tolerance must be >= 0")
+        if not math.isfinite(tolerance):
+            raise _error(source, f"{field_name}.tolerance", "tolerance must be finite")
         checks.append(
             BatchCheck(
                 check_id=check_id,
@@ -174,6 +231,14 @@ def _parse_batch_checks(raw: Any, source: Path) -> tuple[BatchCheck, ...]:
         )
     return tuple(checks)
 
+def _parse_policy(raw: Any, source: Path) -> str:
+    if raw is None:
+        return POLICY_STRICT
+    policy = text(raw, source, "policy")
+    if policy not in POLICIES:
+        raise _error(source, "policy", f"policy must be one of {sorted(POLICIES)}")
+    return policy
+
 def load_validation_config(path: str | Path) -> ValidationConfig:
     source = Path(path)
     doc = load_yaml_document(source)
@@ -187,4 +252,9 @@ def load_validation_config(path: str | Path) -> ValidationConfig:
         for field_name, rule_raw in screen_rules.items():
             parsed[field_name] = _parse_field_rule(rule_raw, source, f"fields.{screen_id}.{field_name}")
         fields[screen_id] = parsed
-    return ValidationConfig(fields=fields, record_checks=_parse_record_checks(doc.get("record_checks"), source), batch_checks=_parse_batch_checks(doc.get("batch_checks"), source))
+    return ValidationConfig(
+        fields=fields,
+        record_checks=_parse_record_checks(doc.get("record_checks"), source, fields),
+        batch_checks=_parse_batch_checks(doc.get("batch_checks"), source),
+        policy=_parse_policy(doc.get("policy"), source),
+    )

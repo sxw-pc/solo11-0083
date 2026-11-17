@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS events (
   context_json TEXT NOT NULL,
   event_sha256 TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS validation_evidence (
+  evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  rule_id TEXT NOT NULL,
+  rule_kind TEXT NOT NULL,
+  screen_id TEXT NOT NULL,
+  record_key TEXT,
+  status TEXT NOT NULL,
+  detail_json TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_records_screen ON records(screen_id);
+CREATE INDEX IF NOT EXISTS idx_validation_evidence_run ON validation_evidence(run_id);
 """

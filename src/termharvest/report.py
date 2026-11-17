@@ -16,6 +16,16 @@ from .validate import ValidationResult
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+EVIDENCE_STATUSES = ("proven_pass", "proven_fail", "unknown", "not_applicable")
+
+def _evidence_counts(evidence: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in EVIDENCE_STATUSES}
+    for item in evidence:
+        status = item.get("status")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
 def build_report_payload(
     *,
     run_id: str,
@@ -68,6 +78,8 @@ def build_report_payload(
         "screens": screen_rows,
         "pagination": page_details,
         "validation": validation.stats,
+        "validation_policy": validation.policy,
+        "evidence": _evidence_counts(validation.evidence),
         "sensitive_fields_skipped": sensitive,
         "report_files": ["report.html", "report.json", "report.md", "report_summary.json", "records.csv"],
     }
@@ -88,6 +100,7 @@ def build_report_payload(
         "summary": summary,
         "records": record_rows,
         "errors": errors,
+        "evidence": validation.evidence,
         "captured_frames": [{"frame_seq": item.frame_seq, "step_id": item.step_id, "screen_id": item.expected_screen, "frame_sha256": item.frame.sha256} for item in frames],
     }
 
