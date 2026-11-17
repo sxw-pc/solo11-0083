@@ -16,6 +16,28 @@ from .validate import ValidationResult
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+def _provenance_summary(provenance: dict[str, Any] | None) -> dict[str, Any]:
+    """Report-safe trust provenance; never includes raw screen text or keys."""
+    source = dict(provenance or {})
+    status = str(source.get("trust_status") or "not_applicable")
+    return {
+        "trust_status": status,
+        "trusted": bool(source.get("trusted", False)),
+        "policy": source.get("policy"),
+        "cassette_version": source.get("cassette_version"),
+        "record_seq": source.get("record_seq"),
+        "accepted_record_seq": source.get("accepted_record_seq"),
+        "contract_digest": source.get("contract_digest"),
+        "signers": [
+            {"key_id": item.get("key_id"), "public_key_fingerprint": item.get("public_key_fingerprint")}
+            for item in source.get("signers", [])
+        ],
+        "error_code": source.get("error_code"),
+        "reason": source.get("reason"),
+        "idempotent": bool(source.get("idempotent", False)),
+        "package_digest": source.get("package_digest"),
+    }
+
 def build_report_payload(
     *,
     run_id: str,
@@ -30,6 +52,7 @@ def build_report_payload(
     validation: ValidationResult,
     records: list[dict[str, Any]],
     errors: list[dict[str, Any]],
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     frames_by_screen: dict[str, int] = {}
     for item in frames:
@@ -52,6 +75,7 @@ def build_report_payload(
         name = str(record["screen_id"])
         records_by_screen[name] = records_by_screen.get(name, 0) + 1
     sensitive = sorted({name for extraction in extractions for name in extraction.sensitive_skipped})
+    trust = _provenance_summary(provenance)
     summary = {
         "schema_version": 1,
         "run_id": run_id,
@@ -69,6 +93,9 @@ def build_report_payload(
         "pagination": page_details,
         "validation": validation.stats,
         "sensitive_fields_skipped": sensitive,
+        "trust": trust,
+        "trust_status": trust["trust_status"],
+        "trusted": trust["trusted"],
         "report_files": ["report.html", "report.json", "report.md", "report_summary.json", "records.csv"],
     }
     record_rows = [
@@ -88,6 +115,7 @@ def build_report_payload(
         "summary": summary,
         "records": record_rows,
         "errors": errors,
+        "trust": trust,
         "captured_frames": [{"frame_seq": item.frame_seq, "step_id": item.step_id, "screen_id": item.expected_screen, "frame_sha256": item.frame.sha256} for item in frames],
     }
 

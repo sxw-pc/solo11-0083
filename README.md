@@ -189,6 +189,43 @@ list_region:
 - 两种模式使用同一套抽取、校验、入库和报告代码。示例 fixture 的 live/replay
   记录完全一致，`scripts/run_demo.sh` 会自动交叉核验。
 
+## 签名 cassette（v2）与受信回放
+
+v1 cassette 只是“格式完整”：每个帧的 SHA-256 与 trailer 计数可核对，但任何人都能
+改写文本并重算帧 SHA，因而无法证明录制方身份。v2 在同一 JSONL 中增加 Ed25519
+签名包，覆盖规范化后的 header、全部 frame 与 trailer，连同 `session_id`、契约摘要
+（`contract_digest`）和每 session 递增的 `record_seq`：
+
+```bash
+# 一次性：生成密钥并只登记公钥（私钥写本地 0600 文件，绝不进入 cassette/日志/报告）
+python -m termharvest.cli keygen --key-id recorder-a \
+  --trust-store data/trust.sqlite --out-private ~/.config/termharvest/a.pem \
+  --out-public data/keys/a.pub
+
+# 离线录制方在本机签名（命令重新计算契约摘要，签名时读取私钥但不落盘）
+python -m termharvest.cli sign-cassette \
+  --cassette fixtures/cassettes/demo_replay.jsonl --out data/demo_v2.jsonl \
+  --session contracts/sessions/demo_session.yaml --screens contracts/screens \
+  --key-id recorder-a --private-key-file ~/.config/termharvest/a.pem --record-seq 1
+
+# 受信回放
+python -m termharvest.cli run ... --mode replay --cassette data/demo_v2.jsonl \
+  --trust-store data/trust.sqlite --trust-policy two_distinct_recorders --require-trusted
+```
+
+- 信任库只保存公钥、`key_id`、有效期、撤销状态，以及每 session 已接受的最高序号。
+- 策略：`any_trusted_recorder`（任一可信录制者签名）或 `two_distinct_recorders`
+  （两个不同可信录制者共同签名）。重复的 `key_id` 在解析阶段即拒绝，复制一份签名
+  不能凑成双签。
+- 回放顺序固定：结构/帧哈希 → 全包签名与策略 → session/契约摘要 → 防回退。
+  任一步失败都不抽取、不推进最高序号；未知/撤销/过期 key、篡改、旧序号、跨
+  session/契约挪用均给出不含屏幕原文的错误码。
+- 同一包重复核验是幂等的，报告标记 `idempotent`，不产生新的录制版本。
+- 签名验证与最高序号更新在同一 SQLite 事务内完成；并发回放只会有一个推进成功。
+- v1 包仍可回放，但报告 `trust_status=unauthenticated`；`--require-trusted` 严格
+  模式会拒绝 unsigned 数据进入受信结果。
+- 报告显示策略、实际可信签名者、公钥指纹与 `record_seq`，不包含原屏文本或密钥。
+
 ## 主要错误码
 
 | 错误码 | 含义 |
@@ -206,6 +243,13 @@ list_region:
 | `E_SCREEN_FINGERPRINT_MISMATCH` | 指纹不一致 |
 | `E_FIELD_*` / `E_RECORD_CONSISTENCY` / `E_BATCH_*` | 字段/记录/批次校验失败 |
 | `E_CASSETTE_*` | cassette 解析、顺序或完整性失败 |
+| `E_TRUST_UNSIGNED` | 严格模式拒绝无签名 v1 包 |
+| `E_TRUST_UNKNOWN_KEY` / `E_TRUST_REVOKED_KEY` / `E_TRUST_EXPIRED_KEY` | 签名 key 不可信 |
+| `E_TRUST_BAD_SIGNATURE` | 内容被篡改或签名与 key 不匹配 |
+| `E_TRUST_DUPLICATE_SIGNER` | 重复 key_id 或同一公钥伪装多签 |
+| `E_TRUST_INSUFFICIENT_SIGNATURES` | 签名数量不满足策略 |
+| `E_TRUST_SESSION_MISMATCH` / `E_TRUST_CONTRACT_MISMATCH` | 跨 session/契约挪用 |
+| `E_TRUST_ROLLBACK` / `E_TRUST_SEQUENCE_CONFLICT` | 旧序号或同序号不同内容 |
 
 配置错误优先于网络行为；只有 loopback 目标才可能进入连接阶段。
 

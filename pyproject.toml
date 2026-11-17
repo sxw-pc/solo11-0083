@@ -9,7 +9,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6.0"]
 [project.optional-dependencies]
-test = ["pytest>=8.0"]
+signing = ["cryptography>=41"]
+test = ["pytest>=8.0", "cryptography>=41"]
 [project.scripts]
 termharvest = "termharvest.cli:main"
 [tool.setuptools.packages.find]

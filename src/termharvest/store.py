@@ -132,6 +132,51 @@ class Store:
         self.connection.commit()
         return "updated"
 
+    def record_provenance(self, run_id: str, provenance: dict[str, Any]) -> None:
+        """Persist report-safe trust provenance for a replay run.
+
+        The caller supplies a provenance mapping that never contains raw screen
+        text or private key material; unknown keys are dropped, not stored.
+        """
+        allowed = ("trust_status", "trusted", "policy", "cassette_version", "record_seq", "contract_digest", "signers", "error_code", "reason", "idempotent", "package_digest", "accepted_record_seq", "diagnostics")
+        safe = {key: provenance.get(key) for key in allowed}
+        self.connection.execute(
+            """INSERT INTO run_provenance(run_id, trust_status, trusted, policy,
+               cassette_version, record_seq, contract_digest, signers_json,
+               package_digest, error_code, provenance_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(run_id) DO UPDATE SET
+                 trust_status=excluded.trust_status, trusted=excluded.trusted,
+                 policy=excluded.policy, cassette_version=excluded.cassette_version,
+                 record_seq=excluded.record_seq, contract_digest=excluded.contract_digest,
+                 signers_json=excluded.signers_json, package_digest=excluded.package_digest,
+                 error_code=excluded.error_code, provenance_json=excluded.provenance_json""",
+            (
+                run_id,
+                str(safe.get("trust_status") or "not_applicable"),
+                1 if safe.get("trusted") else 0,
+                safe.get("policy"),
+                safe.get("cassette_version"),
+                safe.get("record_seq"),
+                safe.get("contract_digest"),
+                _json(safe.get("signers") or []),
+                safe.get("package_digest"),
+                safe.get("error_code"),
+                _json(safe),
+            ),
+        )
+        self.connection.commit()
+
+    def provenance(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM run_provenance WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["trusted"] = bool(result["trusted"])
+        result["signers"] = json.loads(result["signers_json"])
+        result["provenance"] = json.loads(result["provenance_json"])
+        return result
+
     def count_records(self) -> int:
         return int(self.connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
 

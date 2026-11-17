@@ -2,24 +2,92 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .cassette import write_cassette
+from .cassette import compute_contract_digest, load_cassette, write_cassette
 from .clock import Clock, SystemClock
 from .config_types import ScreenContract, SessionContract
-from .errors import HarvestError
+from .errors import E_TRUST_REQUIRED, E_TRUST_UNSIGNED, HarvestError
 from .logging_util import safe_context
 from .pipeline_steps import _collect, _extract_all, make_run_id
 from .report import build_report_payload, write_reports
 from .store import Store
+from .trust import (
+    POLICY_ANY_TRUSTED,
+    TrustStore,
+    normalize_policy,
+    not_applicable_provenance,
+    rejected_provenance,
+    unauthenticated_provenance,
+    verification_error,
+    verify_loaded_cassette,
+)
 from .validate import ValidationResult, validate_records
 from .validate_config import ValidationConfig
 
 def _failure_stats() -> dict[str, Any]:
     return {"records_in": 0, "records_valid": 0, "records_invalid": 0, "error_count": 0, "error_codes": []}
+
+def _verify_replay_cassette(
+    *,
+    cassette_path: str | Path,
+    session: SessionContract,
+    contract_digest: str,
+    trust_store: TrustStore | None,
+    trust_policy: str | None,
+    require_trusted: bool,
+    clock: Clock,
+    accept: bool = True,
+) -> tuple[Any, dict[str, Any], Any]:
+    """Structure/frame hashes first, then whole-package signature verification.
+
+    Nothing is extracted until this returns.  In strict mode, unsigned v1 data
+    and any package that cannot be attributed to a trusted recorder are
+    refused outright; in legacy mode they remain replayable but are reported as
+    ``unauthenticated``.
+
+    ``accept=False`` verifies without advancing anti-rollback state; the caller
+    passes ``accept=True`` only after extraction has succeeded.  The third
+    return value is the :class:`TrustVerification` (or ``None``).
+    """
+    cassette = load_cassette(cassette_path)
+    policy = normalize_policy(trust_policy) if trust_policy else None
+
+    if not cassette.is_signed:
+        if require_trusted:
+            raise HarvestError(
+                E_TRUST_UNSIGNED,
+                "strict trusted replay refuses an unsigned v1 cassette",
+                context={"cassette_version": cassette.version, "file": cassette.source_file},
+            )
+        return cassette, unauthenticated_provenance(cassette), None
+
+    if trust_store is None:
+        if require_trusted:
+            raise HarvestError(
+                E_TRUST_REQUIRED,
+                "strict trusted replay requires a configured trust store",
+                context={"cassette_version": cassette.version, "file": cassette.source_file},
+            )
+        return cassette, unauthenticated_provenance(
+            cassette,
+            reason="signed package was not verified because no trust store was configured",
+        ), None
+
+    verification = verify_loaded_cassette(
+        cassette,
+        trust_store=trust_store,
+        policy=policy or POLICY_ANY_TRUSTED,
+        session_id=session.session_id,
+        contract_digest=contract_digest,
+        clock=clock,
+        accept=accept,
+    )
+    if not verification.trusted:
+        raise verification_error(verification)
+    return cassette, verification.to_provenance(), verification
 
 def run_pipeline(
     *,
@@ -36,6 +104,9 @@ def run_pipeline(
     port_override: int | None = None,
     record_cassette: str | Path | None = None,
     logger: Any = None,
+    trust_store: TrustStore | None = None,
+    trust_policy: str | None = None,
+    require_trusted: bool = False,
 ) -> dict[str, Any]:
     clock = clock or SystemClock()
     output = Path(output_dir)
@@ -46,6 +117,10 @@ def run_pipeline(
     started_at = clock.now_iso()
     run_id = make_run_id(effective, mode, started_at)
     store.start_run(run_id, effective.session_id, mode, started_at)
+    provenance = not_applicable_provenance()
+    cassette = None
+    pending_verification = None
+    contract_digest = compute_contract_digest(effective, screens)
 
     def sink(level: str, event_type: str, code: str | None, message: str, context: dict[str, Any]) -> None:
         store.event(run_id, clock, level, event_type, code=code, message=message, context=safe_context(**context))
@@ -59,7 +134,46 @@ def run_pipeline(
         context={"session_id": effective.session_id, "mode": mode, "target_host": effective.target_host, "target_port": effective.target_port},
     )
     try:
-        frames = _collect(effective, mode=mode, cassette_path=cassette_path, event_sink=sink, clock=clock, evidence_dir=evidence, logger=logger)
+        if mode == "replay":
+            if cassette_path is None:
+                raise HarvestError(E_TRUST_REQUIRED, "replay mode requires a cassette path")
+            try:
+                cassette, provenance, pending_verification = _verify_replay_cassette(
+                    cassette_path=cassette_path,
+                    session=effective,
+                    contract_digest=contract_digest,
+                    trust_store=trust_store,
+                    trust_policy=trust_policy,
+                    require_trusted=require_trusted,
+                    clock=clock,
+                    accept=False,
+                )
+            except HarvestError as exc:
+                provenance = rejected_provenance(
+                    error_code=exc.code,
+                    reason=exc.message,
+                    policy=normalize_policy(trust_policy) if trust_policy else None,
+                )
+                raise
+            store.record_provenance(run_id, provenance)
+            sink(
+                "info",
+                "replay_verified",
+                None,
+                "cassette structure, frame hashes and package signatures verified",
+                {"trust_status": provenance["trust_status"], "policy": provenance["policy"], "record_seq": provenance["record_seq"]},
+            )
+        frames = _collect(
+            effective,
+            mode=mode,
+            cassette_path=cassette_path,
+            event_sink=sink,
+            clock=clock,
+            evidence_dir=evidence,
+            logger=logger,
+            cassette=cassette,
+            trust_provenance=provenance if mode == "replay" else None,
+        )
         for item in frames:
             store.store_frame(run_id, item.frame_seq, item.expected_screen, item.step_id, item.frame, clock.now_iso())
             sink(
@@ -77,6 +191,23 @@ def run_pipeline(
                 captured_by="live" if mode == "live" else "replay",
             )
         extractions, page_details = _extract_all(frames, screens, effective)
+        if pending_verification is not None:
+            # Full extraction succeeded: now atomically re-verify and advance
+            # the per-session anti-rollback sequence.  A failure here (for
+            # example a concurrent higher-sequence recording) rolls back and
+            # aborts the replay, leaving the stored sequence untouched.
+            accepted = trust_store.verify_and_accept(
+                cassette,
+                policy=trust_policy or POLICY_ANY_TRUSTED,
+                session_id=effective.session_id,
+                contract_digest=contract_digest,
+                clock=clock,
+                accept=True,
+            )
+            if not accepted.trusted:
+                raise verification_error(accepted)
+            provenance = accepted.to_provenance()
+            store.record_provenance(run_id, provenance)
         records = [record for extraction in extractions for record in extraction.records]
         facts = {extraction.screen_id: extraction.facts for extraction in extractions}
         validation = validate_records(records, validation_config, facts_by_screen=facts)
@@ -100,6 +231,7 @@ def run_pipeline(
             validation=validation,
             records=records,
             errors=validation.errors,
+            provenance=provenance,
         )
         store.finish_run(
             run_id,
@@ -131,7 +263,13 @@ def run_pipeline(
             validation=empty,
             records=[],
             errors=[failure_error],
+            provenance=provenance,
         )
+        if mode == "replay":
+            try:
+                store.record_provenance(run_id, provenance)
+            except HarvestError:
+                pass
         store.finish_run(run_id, status="failed", finished_at=finished_at, record_count=0, error_count=1, error_code=exc.code, summary=payload["summary"])
         write_reports(output, payload)
         raise

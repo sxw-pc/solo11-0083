@@ -1,4 +1,32 @@
-"""SQLite schema for the termharvest ledger."""
+"""SQLite schema for the termharvest ledger and the signed-cassette trust store."""
+
+# Trust material is public-only: key_id, Ed25519 public key, validity window,
+# revocation state and the highest accepted recording sequence per session.
+# Private keys are deliberately absent from this schema.
+TRUST_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trust_keys (
+  key_id TEXT PRIMARY KEY,
+  algorithm TEXT NOT NULL DEFAULT 'ed25519',
+  public_key_b64 TEXT NOT NULL,
+  public_key_fingerprint TEXT NOT NULL,
+  valid_from TEXT,
+  valid_until TEXT,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  revoked_at TEXT,
+  revoked_reason TEXT,
+  enrolled_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trust_keys_fingerprint
+  ON trust_keys(public_key_fingerprint);
+CREATE TABLE IF NOT EXISTS trust_sessions (
+  session_id TEXT PRIMARY KEY,
+  highest_record_seq INTEGER NOT NULL,
+  package_digest TEXT NOT NULL,
+  policy TEXT NOT NULL,
+  signers_json TEXT NOT NULL,
+  trusted_at TEXT NOT NULL
+);
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -50,6 +78,20 @@ CREATE TABLE IF NOT EXISTS events (
   message TEXT NOT NULL,
   context_json TEXT NOT NULL,
   event_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS run_provenance (
+  run_id TEXT PRIMARY KEY,
+  trust_status TEXT NOT NULL,
+  trusted INTEGER NOT NULL,
+  policy TEXT,
+  cassette_version INTEGER,
+  record_seq INTEGER,
+  contract_digest TEXT,
+  signers_json TEXT NOT NULL DEFAULT '[]',
+  package_digest TEXT,
+  error_code TEXT,
+  provenance_json TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_records_screen ON records(screen_id);
