@@ -47,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--port", type=int)
     run.add_argument("--evidence-dir")
     run.add_argument("--record-cassette")
+    run.add_argument("--input-mode", choices=["strict_snapshot", "bounded_draw"], default="strict_snapshot", help="screen input contract used to validate raw frames")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
     return parser
@@ -84,6 +85,7 @@ def _run(args: argparse.Namespace) -> int:
             host_override=args.host,
             port_override=args.port,
             record_cassette=args.record_cassette,
+            input_mode=args.input_mode,
             logger=logger,
         )
     finally:

@@ -88,7 +88,17 @@ def build_report_payload(
         "summary": summary,
         "records": record_rows,
         "errors": errors,
-        "captured_frames": [{"frame_seq": item.frame_seq, "step_id": item.step_id, "screen_id": item.expected_screen, "frame_sha256": item.frame.sha256} for item in frames],
+        "captured_frames": [
+            {
+                "frame_seq": item.frame_seq,
+                "step_id": item.step_id,
+                "screen_id": item.expected_screen,
+                "frame_sha256": item.frame.sha256,
+                "visible_sha256": item.frame.visible_sha256,
+                "input_mode": item.frame.input_mode,
+            }
+            for item in frames
+        ],
     }
 
 def _write_json(path: Path, value: Any) -> None:

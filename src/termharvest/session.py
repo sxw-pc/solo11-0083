@@ -14,7 +14,7 @@ from .config_util import is_loopback_host
 from .errors import E_CONNECTION_FAILED, E_SCREEN_UNEXPECTED, E_STEP_RETRY_EXHAUSTED, E_TARGET_NOT_ALLOWED, HarvestError
 from .logging_util import safe_context
 from .protocol import FrameReader, send_key
-from .screen import ScreenFrame
+from .screen import DEFAULT_INPUT_MODE, INPUT_MODES, ScreenFrame
 
 EventSink = Callable[[str, str, str | None, str, dict[str, Any]], None]
 
@@ -35,12 +35,28 @@ def _write_evidence(directory: Path | None, label: str, text: str) -> str | None
 class TerminalSession:
     """Drives a session script over a socket; it can only send key tokens."""
 
-    def __init__(self, session: SessionContract, *, event_sink: EventSink | None = None, clock: Clock | None = None, evidence_dir: str | Path | None = None, logger: Any = None) -> None:
+    def __init__(
+        self,
+        session: SessionContract,
+        *,
+        event_sink: EventSink | None = None,
+        clock: Clock | None = None,
+        evidence_dir: str | Path | None = None,
+        logger: Any = None,
+        input_mode: str = DEFAULT_INPUT_MODE,
+    ) -> None:
+        if input_mode not in INPUT_MODES:
+            raise HarvestError(
+                E_TARGET_NOT_ALLOWED,
+                "unknown screen input contract",
+                context={"input_mode": input_mode, "allowed": list(INPUT_MODES)},
+            )
         self.session = session
         self.event_sink = event_sink
         self.clock = clock or SystemClock()
         self.evidence_dir = Path(evidence_dir) if evidence_dir else None
         self.logger = logger
+        self.input_mode = input_mode
         self.sock: socket.socket | None = None
         self.reader: FrameReader | None = None
         self.last_frame: ScreenFrame | None = None
@@ -76,19 +92,39 @@ class TerminalSession:
         raw = self.reader.read_frame()
         self.last_raw = raw
         try:
-            frame = ScreenFrame.parse(raw)
+            frame = ScreenFrame.parse(raw, input_mode=self.input_mode)
         except HarvestError as exc:
             path = _write_evidence(self.evidence_dir, "malformed", raw)
-            raise HarvestError(exc.code, exc.message, context={**exc.context, "step_id": step_id, "evidence": path}, cause=exc) from exc
+            raise HarvestError(exc.code, exc.message, context={**exc.context, "step_id": step_id, "input_mode": self.input_mode, "evidence": path}, cause=exc) from exc
         self.last_frame = frame
-        self._emit("info", "frame_received", None, "received screen frame", step_id=step_id, screen_id=expectation.screen_id, frame_sha256=frame.sha256, bytes=len(raw.encode("utf-8")))
-        missing = [item for item in expectation.contains if item not in frame.text]
+        self._emit(
+            "info",
+            "frame_received",
+            None,
+            "received screen frame",
+            step_id=step_id,
+            screen_id=expectation.screen_id,
+            frame_sha256=frame.sha256,
+            visible_sha256=frame.visible_sha256,
+            input_mode=frame.input_mode,
+            bytes=len(raw.encode("utf-8")),
+        )
+        visible = frame.visible_text
+        missing = [item for item in expectation.contains if item not in visible]
         if missing:
             path = _write_evidence(self.evidence_dir, evidence_label, raw)
             raise HarvestError(
                 E_SCREEN_UNEXPECTED,
                 "received screen does not match the session expectation",
-                context={"step_id": step_id, "screen_id": expectation.screen_id, "missing": missing, "frame_sha256": frame.sha256, "evidence": path},
+                context={
+                    "step_id": step_id,
+                    "screen_id": expectation.screen_id,
+                    "missing": missing,
+                    "frame_sha256": frame.sha256,
+                    "visible_sha256": frame.visible_sha256,
+                    "input_mode": frame.input_mode,
+                    "evidence": path,
+                },
             )
         return frame
 

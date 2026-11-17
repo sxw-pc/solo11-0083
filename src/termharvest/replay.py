@@ -40,7 +40,7 @@ def collect_replay(
             raise HarvestError(E_CASSETTE_MISMATCH, "cassette frame order does not match session steps", context={"index": index, "expected_step": step_id, "record_step": record.step_id})
         if record.expected_screen != screen_id:
             raise HarvestError(E_CASSETTE_MISMATCH, "cassette expected_screen does not match contract", context={"index": index, "expected_screen": screen_id, "record_screen": record.expected_screen})
-        missing = [fragment for fragment in fragments if fragment not in record.frame.text]
+        missing = [fragment for fragment in fragments if fragment not in record.frame.visible_text]
         if missing:
             path = _write_evidence(evidence, f"unexpected_{step_id}", record.frame.text)
             emit(
@@ -51,14 +51,34 @@ def collect_replay(
                 step_id=step_id,
                 missing=missing,
                 frame_sha256=record.frame.sha256,
+                visible_sha256=record.frame.visible_sha256,
+                input_mode=record.frame.input_mode,
                 evidence=path,
             )
             raise HarvestError(
                 E_SCREEN_UNEXPECTED,
                 "replayed frame does not match session expectation",
-                context={"step_id": step_id, "screen_id": screen_id, "missing": missing, "frame_sha256": record.frame.sha256, "evidence": path},
+                context={
+                    "step_id": step_id,
+                    "screen_id": screen_id,
+                    "missing": missing,
+                    "frame_sha256": record.frame.sha256,
+                    "visible_sha256": record.frame.visible_sha256,
+                    "input_mode": record.frame.input_mode,
+                    "evidence": path,
+                },
             )
-        emit("info", "replay_frame", None, "loaded replay frame", step_id=step_id, screen_id=screen_id, frame_sha256=record.frame.sha256)
+        emit(
+            "info",
+            "replay_frame",
+            None,
+            "loaded replay frame",
+            step_id=step_id,
+            screen_id=screen_id,
+            frame_sha256=record.frame.sha256,
+            visible_sha256=record.frame.visible_sha256,
+            input_mode=record.frame.input_mode,
+        )
         captured.append(CapturedFrame(frame_seq=index, step_id=step_id, expected_screen=screen_id, frame=record.frame))
     emit("info", "replay_complete", None, "cassette replay completed", frames=len(captured), captured_by=cassette.captured_by, at=clock.now_iso())
     return captured

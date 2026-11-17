@@ -13,18 +13,19 @@ from .errors import E_SCENARIO_INVALID, E_SCREEN_NOT_CAPTURED, HarvestError
 from .extract import Extraction, extract_screen
 from .extract_pages import extract_pages
 from .replay import collect_replay
+from .screen import DEFAULT_INPUT_MODE
 from .session import TerminalSession
 
 def make_run_id(session: SessionContract, mode: str, started_at: str) -> str:
     seed = "|".join([session.session_id, mode, started_at, session.target_host, str(session.target_port)])
     return "run-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
-def _collect(session: SessionContract, *, mode: str, cassette_path: str | Path | None, event_sink: Any, clock: Clock, evidence_dir: Path, logger: Any) -> list[CapturedFrame]:
+def _collect(session: SessionContract, *, mode: str, cassette_path: str | Path | None, event_sink: Any, clock: Clock, evidence_dir: Path, logger: Any, input_mode: str = DEFAULT_INPUT_MODE) -> list[CapturedFrame]:
     if mode == "replay":
         if cassette_path is None:
             raise HarvestError(E_SCENARIO_INVALID, "replay mode requires a cassette path")
         return collect_replay(cassette_path, session, event_sink=event_sink, clock=clock, evidence_dir=evidence_dir, logger=logger)
-    return TerminalSession(session, event_sink=event_sink, clock=clock, evidence_dir=evidence_dir, logger=logger).collect()
+    return TerminalSession(session, event_sink=event_sink, clock=clock, evidence_dir=evidence_dir, logger=logger, input_mode=input_mode).collect()
 
 def _contract_screen_order(frames: list[CapturedFrame], screens: dict[str, ScreenContract]) -> list[str]:
     order: list[str] = []

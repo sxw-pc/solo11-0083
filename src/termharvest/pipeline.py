@@ -14,6 +14,7 @@ from .errors import HarvestError
 from .logging_util import safe_context
 from .pipeline_steps import _collect, _extract_all, make_run_id
 from .report import build_report_payload, write_reports
+from .screen import DEFAULT_INPUT_MODE
 from .store import Store
 from .validate import ValidationResult, validate_records
 from .validate_config import ValidationConfig
@@ -35,6 +36,7 @@ def run_pipeline(
     host_override: str | None = None,
     port_override: int | None = None,
     record_cassette: str | Path | None = None,
+    input_mode: str = DEFAULT_INPUT_MODE,
     logger: Any = None,
 ) -> dict[str, Any]:
     clock = clock or SystemClock()
@@ -59,7 +61,7 @@ def run_pipeline(
         context={"session_id": effective.session_id, "mode": mode, "target_host": effective.target_host, "target_port": effective.target_port},
     )
     try:
-        frames = _collect(effective, mode=mode, cassette_path=cassette_path, event_sink=sink, clock=clock, evidence_dir=evidence, logger=logger)
+        frames = _collect(effective, mode=mode, cassette_path=cassette_path, event_sink=sink, clock=clock, evidence_dir=evidence, logger=logger, input_mode=input_mode)
         for item in frames:
             store.store_frame(run_id, item.frame_seq, item.expected_screen, item.step_id, item.frame, clock.now_iso())
             sink(
