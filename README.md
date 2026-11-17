@@ -189,6 +189,40 @@ list_region:
 - 两种模式使用同一套抽取、校验、入库和报告代码。示例 fixture 的 live/replay
   记录完全一致，`scripts/run_demo.sh` 会自动交叉核验。
 
+## 会话可达性预检（offline precheck）
+
+`precheck` 子命令在不打开任何 socket、不连接真实终端的前提下，把会话脚本
+与本地 mock 场景一起建模，复用 live 客户端的精确语义（起始屏 `contains`
+校验、按序发键、失败后重连并从 start 重放已接受步骤、
+`attempts`/`backoff_ms`/`timeout_seconds`），给出**可复核的成功路径**或
+**最短失败轨迹**（逐步状态/按键/期待屏/实际屏/耗时）：
+
+```bash
+# 名义可达：只检查无注入故障路径（场景自带 drop_keys/delay_ms 仍生效）
+python -m termharvest.cli precheck \
+  --session contracts/sessions/demo_session.yaml \
+  --scenario fixtures/mock_host/demo.json \
+  --mode nominal
+
+# 预算内保证可达：在“整段轨迹总共最多一次丢键或一次响应超时”的
+# 注入预算下，要求每条允许轨迹都采齐帧
+python -m termharvest.cli precheck \
+  --session contracts/sessions/demo_session.yaml \
+  --scenario fixtures/mock_host/demo.json \
+  --mode guarantee
+```
+
+- 模型状态有界：当前屏幕 ID、已完成步骤索引、连接阶段（断开/重放第 j 步/
+  就绪）、当前步骤重试次数、已用丢键/超时预算。
+- 模型区分“目标屏出现过”与“客户端在正确 step 收到并接受了它”：重放走到
+  另一屏或读到错误帧时，当前步不会被标成功。
+- 反例分类：场景转移缺失、未知键屏、按键丢失、响应延迟超过 timeout、
+  重试耗尽；退出码 `0`=证成，`1`=被否证，`2`=未证成（状态空间超过
+  `--state-limit`，绝不当作成功）。
+- 报告末尾固定输出证明范围：结果只覆盖 mock 场景的确定性行为与上述故障
+  模型，未覆盖真实网络故障（连接重置、粘包/乱序、帧损坏、TLS、主机行为
+  漂移等），不构成对任何生产主机的保证。
+
 ## 主要错误码
 
 | 错误码 | 含义 |

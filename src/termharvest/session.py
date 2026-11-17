@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .capture import CapturedFrame
 from .clock import Clock, SystemClock
-from .config_types import Expectation, SessionContract
+from .config_types import Expectation, RetryConfig, SessionContract
 from .config_util import is_loopback_host
 from .errors import E_CONNECTION_FAILED, E_SCREEN_UNEXPECTED, E_STEP_RETRY_EXHAUSTED, E_TARGET_NOT_ALLOWED, HarvestError
 from .logging_util import safe_context
@@ -17,6 +17,19 @@ from .protocol import FrameReader, send_key
 from .screen import ScreenFrame
 
 EventSink = Callable[[str, str, str | None, str, dict[str, Any]], None]
+
+def missing_fragments(frame: ScreenFrame, expectation: Expectation) -> list[str]:
+    """Required ``contains`` fragments that ``frame`` does not contain.
+
+    This is the exact acceptance rule used by the live client; the offline
+    reachability model in ``session_model`` reuses it so both agree on what
+    "accepted at a step" means.
+    """
+    return [item for item in expectation.contains if item not in frame.text]
+
+def backoff_seconds(retry: RetryConfig, attempt: int) -> float:
+    """Delay before the attempt following the failed 1-based ``attempt``."""
+    return (retry.backoff_ms / 1000.0) * attempt
 
 def ensure_loopback_target(host: str, port: int) -> None:
     """Runtime whitelist check, independent from configuration parsing."""
@@ -82,7 +95,7 @@ class TerminalSession:
             raise HarvestError(exc.code, exc.message, context={**exc.context, "step_id": step_id, "evidence": path}, cause=exc) from exc
         self.last_frame = frame
         self._emit("info", "frame_received", None, "received screen frame", step_id=step_id, screen_id=expectation.screen_id, frame_sha256=frame.sha256, bytes=len(raw.encode("utf-8")))
-        missing = [item for item in expectation.contains if item not in frame.text]
+        missing = missing_fragments(frame, expectation)
         if missing:
             path = _write_evidence(self.evidence_dir, evidence_label, raw)
             raise HarvestError(
@@ -121,7 +134,7 @@ class TerminalSession:
                 )
                 self._close()
                 if attempt < self.session.retry.attempts:
-                    self.clock.sleep((self.session.retry.backoff_ms / 1000.0) * attempt)
+                    self.clock.sleep(backoff_seconds(self.session.retry, attempt))
         context = {
             "step_id": step.step_id,
             "attempts": self.session.retry.attempts,

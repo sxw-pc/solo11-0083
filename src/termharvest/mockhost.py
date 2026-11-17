@@ -150,15 +150,14 @@ class MockTerminalServer:
                 key = self._read_key(connection)
                 if key is None:
                     break
-                if key in self.scenario.drop_keys:
+                plan = self.scenario.plan_response(current, key)
+                if plan.kind == "drop":
                     if self.logger is not None:
                         self.logger.info("event=mock_drop key=%s", key)
                     continue
-                delay = self.scenario.delay_ms.get(key, 0)
-                if delay:
-                    time.sleep(delay / 1000.0)
-                next_screen = self.scenario.next_screen(current, key)
-                current = next_screen
+                if plan.delay_ms:
+                    time.sleep(plan.delay_ms / 1000.0)
+                current = plan.screen
                 connection.sendall(wire_frame(self.scenario.frame(current).text))
                 if self.logger is not None:
                     self.logger.info("event=mock_frame key=%s screen=%s", key, current)

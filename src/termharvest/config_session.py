@@ -63,3 +63,14 @@ def load_session(path: str | Path) -> SessionContract:
         )
 
     return SessionContract(session_id=session_id, target_host=host, target_port=port, start=start, steps=tuple(steps), paging=paging, retry=retry, source_file=str(source))
+
+def summarize_session(session: SessionContract) -> dict[str, Any]:
+    """JSON-safe summary of a session contract, used by precheck reports."""
+    return {
+        "session_id": session.session_id,
+        "source_file": session.source_file,
+        "target": {"host": session.target_host, "port": session.target_port},
+        "start_screen": session.start.screen_id,
+        "steps": [{"id": step.step_id, "key": step.key, "expect_screen": step.expect.screen_id} for step in session.steps],
+        "retry": {"attempts": session.retry.attempts, "timeout_seconds": session.retry.timeout_seconds, "backoff_ms": session.retry.backoff_ms},
+    }

@@ -5,14 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from . import AUTHORIZED_USE_NOTICE, __version__
 from .config import load_screens_dir, load_session
-from .errors import HarvestError
+from .config_session import summarize_session
+from .errors import E_CONFIG_SCHEMA, HarvestError
 from .logging_util import build_logger
+from .mock_scenario import load_scenario
 from .mockhost import MockTerminalServer
 from .pipeline import run_pipeline
+from .session_model import STATUS_UNPROVEN, PrecheckOptions, check_session_reachability, format_result
 from .store import Store
 from .validate_config import load_validation_config
 
@@ -49,6 +53,19 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--record-cassette")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
+
+    precheck = sub.add_parser(
+        "precheck",
+        help="offline reachability precheck of a session against a mock scenario",
+        description="对会话脚本与本地 mock 场景做离线可达性预检：不连接任何终端，给出可复核的成功路径或最短失败轨迹。",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    precheck.add_argument("--session", required=True)
+    precheck.add_argument("--scenario", required=True)
+    precheck.add_argument("--mode", choices=["nominal", "guarantee"], default="nominal")
+    precheck.add_argument("--state-limit", type=int, default=20000)
+    precheck.add_argument("--json", action="store_true")
     return parser
 
 def _serve(args: argparse.Namespace) -> int:
@@ -92,6 +109,21 @@ def _run(args: argparse.Namespace) -> int:
     print("RUN_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if summary["status"] == "success" else 1
 
+def _precheck(args: argparse.Namespace) -> int:
+    if args.state_limit < 1:
+        raise HarvestError(E_CONFIG_SCHEMA, "state-limit must be >= 1", context={"state_limit": args.state_limit})
+    session = load_session(args.session)
+    scenario = load_scenario(args.scenario)
+    result = check_session_reachability(session, scenario, PrecheckOptions(mode=args.mode, state_limit=args.state_limit))
+    if args.json:
+        payload = {"session": summarize_session(session), "result": asdict(result)}
+        print("PRECHECK_RESULT " + json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+    else:
+        print(format_result(result), flush=True)
+    if result.status == STATUS_UNPROVEN:
+        return 2
+    return 0 if result.proven else 1
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -99,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
             return _serve(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "precheck":
+            return _precheck(args)
         return 2
     except HarvestError as exc:
         print(f"ERROR {exc.code}: {exc.message}", file=sys.stderr)

@@ -17,6 +17,21 @@ class ScenarioScreen:
     transitions: dict[str, str]
 
 @dataclass(frozen=True)
+class KeyResponse:
+    """What the mock terminal would do when ``key`` arrives on ``current``.
+
+    ``kind`` is ``"answer"`` (a frame is sent after ``delay_ms``) or ``"drop"``
+    (the key is swallowed and no frame is ever sent). ``via`` records how the
+    next screen was resolved: ``"transition"``, ``"unknown_key_screen"`` or
+    ``"missing_transition"`` (the mock stays on the current screen).
+    """
+
+    kind: str
+    screen: str | None
+    delay_ms: int
+    via: str
+
+@dataclass(frozen=True)
 class MockScenario:
     scenario_id: str
     start_screen: str
@@ -36,6 +51,24 @@ class MockScenario:
         if self.unknown_key_screen is not None:
             return self.unknown_key_screen
         return current
+
+    def plan_response(self, current: str, key: str) -> KeyResponse:
+        """Deterministic response of the mock terminal to one key token.
+
+        Shared by the loopback server (``mockhost``) and the offline
+        reachability model (``session_model``) so both agree on drop/delay/
+        transition semantics.
+        """
+        if key in self.drop_keys:
+            return KeyResponse(kind="drop", screen=None, delay_ms=0, via="drop")
+        transitions = self.screens[current].transitions
+        if key in transitions:
+            via, target = "transition", transitions[key]
+        elif self.unknown_key_screen is not None:
+            via, target = "unknown_key_screen", self.unknown_key_screen
+        else:
+            via, target = "missing_transition", current
+        return KeyResponse(kind="answer", screen=target, delay_ms=self.delay_ms.get(key, 0), via=via)
 
 def _invalid(message: str, source: Path, field_name: str) -> HarvestError:
     return HarvestError(E_SCENARIO_INVALID, message, context={"file": str(source), "field": field_name})
