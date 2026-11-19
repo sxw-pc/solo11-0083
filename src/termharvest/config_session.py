@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .config_types import Expectation, PagingConfig, RetryConfig, SessionContract, SessionStep
+from .config_types import Expectation, PagingConfig, PrecheckConfig, RetryConfig, SessionContract, SessionStep
 from .config_util import integer, list_value, load_yaml_document, mapping, schema_error, string_list, text, validate_target_parts
 
 KEY_RE = re.compile(r"^[A-Z0-9]{1,16}$")
@@ -62,4 +62,25 @@ def load_session(path: str | Path) -> SessionContract:
             stop_on_repeated_page=bool(paging_item.get("stop_on_repeated_page", True)),
         )
 
-    return SessionContract(session_id=session_id, target_host=host, target_port=port, start=start, steps=tuple(steps), paging=paging, retry=retry, source_file=str(source))
+    precheck = _parse_precheck(doc.get("precheck"), source)
+
+    return SessionContract(session_id=session_id, target_host=host, target_port=port, start=start, steps=tuple(steps), paging=paging, retry=retry, source_file=str(source), precheck=precheck)
+
+def _parse_precheck(raw: Any, source: Path) -> PrecheckConfig | None:
+    """Optional offline contract precheck; absent means the legacy flow."""
+    if raw is None:
+        return None
+    item = mapping(raw, source, "precheck")
+    deployment = item.get("deployment", False)
+    if not isinstance(deployment, bool):
+        raise schema_error("deployment must be boolean", source, "precheck.deployment")
+    scenario = item.get("regression_scenario")
+    if scenario is not None:
+        scenario = text(scenario, source, "precheck.regression_scenario")
+    budget_raw = mapping(item.get("budget", {}), source, "precheck.budget")
+    budget: list[tuple[str, int]] = []
+    for key, value in budget_raw.items():
+        budget.append((text(key, source, "precheck.budget"), integer(value, source, f"precheck.budget.{key}", minimum=1)))
+    if not deployment and scenario is None:
+        raise schema_error("precheck must enable deployment or regression_scenario", source, "precheck")
+    return PrecheckConfig(deployment=deployment, regression_scenario=scenario, budget=tuple(sorted(budget)))

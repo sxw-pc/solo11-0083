@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config_types import Locator, ScreenContract, ScreenField
 from .errors import E_EXTRACT_LOCATOR_OUT_OF_BOUNDS, HarvestError
 from .screen import ScreenFrame, ensure_contract_match, ensure_fingerprint, find_label_row, normalize_value
+from .validate_config import ValidationConfig, screen_validation_config
+
+if TYPE_CHECKING:
+    from .validate import ValidationResult
 
 @dataclass
 class Extraction:
@@ -139,3 +143,15 @@ def extract_screen(frame: ScreenFrame, contract: ScreenContract, frame_seq: int,
     result.records = [_record(contract, frame, frame_seq, raw_values, normalized)]
     result.sensitive_skipped = sorted(set(skipped))
     return result
+
+def validate_extraction(extraction: Extraction, validation_config: ValidationConfig) -> "ValidationResult":
+    """Run the real validation engine on one extraction's records and facts.
+
+    Checks are screen-scoped, so this is exactly what the pipeline would
+    report for this extraction had it been collected in isolation. The
+    offline contract precheck uses it to verify synthesized witness screens.
+    """
+    from .validate import validate_records
+
+    scoped = screen_validation_config(validation_config, extraction.screen_id)
+    return validate_records(extraction.records, scoped, facts_by_screen={extraction.screen_id: extraction.facts})

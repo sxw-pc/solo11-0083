@@ -11,6 +11,14 @@ class Locator:
     data: dict[str, Any]
 
 @dataclass(frozen=True)
+class Span:
+    """A fixed character span on the 24x80 screen (half-open columns)."""
+
+    row: int
+    col: int
+    length: int
+
+@dataclass(frozen=True)
 class Column:
     name: str
     start: int
@@ -76,6 +84,14 @@ class RetryConfig:
     backoff_ms: int = 100
 
 @dataclass(frozen=True)
+class PrecheckConfig:
+    """Offline contract precheck switches (disabled when absent)."""
+
+    deployment: bool = False
+    regression_scenario: str | None = None
+    budget: tuple[tuple[str, int], ...] = ()
+
+@dataclass(frozen=True)
 class SessionContract:
     session_id: str
     target_host: str
@@ -85,6 +101,7 @@ class SessionContract:
     paging: PagingConfig | None
     retry: RetryConfig
     source_file: str
+    precheck: PrecheckConfig | None = None
 
 @dataclass(frozen=True)
 class ScreenBatch:

@@ -188,3 +188,16 @@ def load_validation_config(path: str | Path) -> ValidationConfig:
             parsed[field_name] = _parse_field_rule(rule_raw, source, f"fields.{screen_id}.{field_name}")
         fields[screen_id] = parsed
     return ValidationConfig(fields=fields, record_checks=_parse_record_checks(doc.get("record_checks"), source), batch_checks=_parse_batch_checks(doc.get("batch_checks"), source))
+
+def screen_validation_config(config: ValidationConfig, screen_id: str) -> ValidationConfig:
+    """Restrict a configuration to one screen.
+
+    Field rules, record checks and batch checks are all keyed by screen_id,
+    so validating one screen's extraction under the restricted configuration
+    is identical to validating it under the full configuration.
+    """
+    return ValidationConfig(
+        fields={screen_id: config.fields[screen_id]} if screen_id in config.fields else {},
+        record_checks=tuple(check for check in config.record_checks if check.screen_id == screen_id),
+        batch_checks=tuple(check for check in config.batch_checks if check.screen_id == screen_id),
+    )

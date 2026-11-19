@@ -10,6 +10,7 @@ from typing import Any
 from .cassette import write_cassette
 from .clock import Clock, SystemClock
 from .config_types import ScreenContract, SessionContract
+from .contract_sat import run_session_precheck
 from .errors import HarvestError
 from .logging_util import safe_context
 from .pipeline_steps import _collect, _extract_all, make_run_id
@@ -59,6 +60,20 @@ def run_pipeline(
         context={"session_id": effective.session_id, "mode": mode, "target_host": effective.target_host, "target_port": effective.target_port},
     )
     try:
+        if effective.precheck is not None:
+            # Offline contract precheck runs before any loopback connection is
+            # opened and before any record is written. UNSAT refuses the run;
+            # UNKNOWN is never silently treated as SAT.
+            outcome = run_session_precheck(effective, screens, validation_config)
+            sink(
+                "error" if outcome.refusal is not None else "info",
+                "contract_precheck",
+                outcome.refusal.code if outcome.refusal is not None else None,
+                "offline contract precheck completed",
+                outcome.event_context(),
+            )
+            if outcome.refusal is not None:
+                raise outcome.refusal
         frames = _collect(effective, mode=mode, cassette_path=cassette_path, event_sink=sink, clock=clock, evidence_dir=evidence, logger=logger)
         for item in frames:
             store.store_frame(run_id, item.frame_seq, item.expected_screen, item.step_id, item.frame, clock.now_iso())

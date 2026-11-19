@@ -6,11 +6,25 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .config_types import Column, ListRegion, Locator, ScreenContract, ScreenField
+from .config_types import Column, ListRegion, Locator, ScreenContract, ScreenField, Span
 from .config_util import integer, list_value, load_yaml_document, mapping, schema_error, string_list, text
 from .errors import E_CONFIG_BAD_LOCATOR, E_CONFIG_DUPLICATE_FIELD, E_CONFIG_PARSE, E_CONFIG_SCHEMA, HarvestError
 
 NORMALIZE_RULES = frozenset({"trim", "collapse_space", "fullwidth_digits", "upper"})
+
+def locator_spans(locator: Locator) -> tuple[Span, ...]:
+    """Fixed character spans a locator occupies on the 24x80 grid.
+
+    Only ``absolute`` and ``multiline`` locators have fixed spans; ``label``
+    locators float within their search rows and return an empty tuple here
+    (their placement is solved by the offline contract precheck instead).
+    """
+    data = locator.data
+    if locator.kind == "absolute":
+        return (Span(row=data["row"], col=data["col"], length=data["length"]),)
+    if locator.kind == "multiline":
+        return tuple(Span(row=row, col=data["col"], length=data["length"]) for row in data["rows"])
+    return ()
 
 def _parse_locator(raw: Any, path: Path, field_name: str) -> Locator:
     item = mapping(raw, path, field_name)

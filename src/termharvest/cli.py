@@ -49,6 +49,20 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--record-cassette")
     run.add_argument("--log-level", default="INFO")
     run.add_argument("--log-file")
+
+    check = sub.add_parser(
+        "check-contract",
+        help="offline screen-contract satisfiability precheck (SAT/UNSAT/UNKNOWN)",
+        description="离线屏幕契约可满足性预检：在真实采集前给出可复核的 SAT、UNSAT 或 UNKNOWN 结果。",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    check.add_argument("--screens", required=True)
+    check.add_argument("--validators", required=True)
+    check.add_argument("--screen-id", help="only check one screen contract")
+    check.add_argument("--session", help="session script; required together with --scenario for the regression walk")
+    check.add_argument("--scenario", help="local mock scenario JSON for regression adaptation")
+    check.add_argument("--max-assignments", type=int, help="override the assignment search budget")
     return parser
 
 def _serve(args: argparse.Namespace) -> int:
@@ -92,6 +106,34 @@ def _run(args: argparse.Namespace) -> int:
     print("RUN_RESULT " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if summary["status"] == "success" else 1
 
+def _check_contract(args: argparse.Namespace) -> int:
+    from .contract_sat import PURPOSE_REGRESSION, SAT, SatBudget, check_regression_adaptation, solve_screen_contract
+    from .mock_scenario import load_scenario
+
+    screens = load_screens_dir(args.screens)
+    validation_config = load_validation_config(args.validators)
+    budget = SatBudget.from_overrides({"max_assignments": args.max_assignments} if args.max_assignments else None)
+    results = []
+    for screen_id in sorted(screens):
+        if args.screen_id and screen_id != args.screen_id:
+            continue
+        results.append(solve_screen_contract(screens[screen_id], validation_config, budget=budget))
+    if args.scenario:
+        if not args.session:
+            print("ERROR E_CONFIG_SCHEMA: --scenario requires --session for the regression walk", file=sys.stderr)
+            return 2
+        session = load_session(args.session)
+        scenario = load_scenario(args.scenario)
+        results.extend(check_regression_adaptation(session, screens, validation_config, scenario))
+    if not results:
+        print("ERROR E_CONFIG_SCHEMA: no screen contracts selected", file=sys.stderr)
+        return 2
+    ok = True
+    for result in results:
+        ok = ok and result.verdict == SAT
+        print("CONTRACT_CHECK " + json.dumps(result.to_dict(include_witness=True), ensure_ascii=False, sort_keys=True), flush=True)
+    return 0 if ok else 1
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -99,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
             return _serve(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "check-contract":
+            return _check_contract(args)
         return 2
     except HarvestError as exc:
         print(f"ERROR {exc.code}: {exc.message}", file=sys.stderr)
